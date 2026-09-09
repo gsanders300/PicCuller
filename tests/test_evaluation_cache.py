@@ -3,12 +3,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from evaluation_cache import CachedEvaluation, EvaluationCache, FileFingerprint
+
+# A real normalized little-endian float32 vector, so the round trip through
+# record_from_cache's np.frombuffer is actually exercised.
+SAMPLE_EMBEDDING = np.asarray([0.5, -0.5, 0.5, -0.5, 0.25, 0.75, -0.25, 0.125], dtype="<f4")
 
 
 def sample_evaluation() -> CachedEvaluation:
     return CachedEvaluation(
-        timestamp_iso="2026-09-09T12:34:56.123456",
+        timestamp_iso="2026-09-09T12:34:56.123456+02:00",
         timestamp_source="exiftool:DateTimeOriginal",
         timezone_source="embedded_offset",
         camera_model="Camera X",
@@ -27,8 +33,8 @@ def sample_evaluation() -> CachedEvaluation:
         eye_count=2,
         eye_factor=1.0,
         eye_warning="",
-        embedding_bytes=b"embedding",
-        embedding_length=9,
+        embedding_bytes=SAMPLE_EMBEDDING.tobytes(),
+        embedding_length=int(SAMPLE_EMBEDDING.size),
     )
 
 

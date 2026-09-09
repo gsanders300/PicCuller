@@ -117,13 +117,22 @@ The lookup identity contains resolved path, size, nanosecond modification time, 
 identities, algorithm version, image size, metadata backend, assumed timezone, and
 preset. The cache stores no executable pickle data.
 
+A failed cache write does not discard the evaluation. The record is kept for ranking,
+reporting, and export, and the fault is recorded as a `cache_write` failure. The only
+condition that discards a completed evaluation is a changed file fingerprint, recorded as
+a `checkpoint` failure, because a file that changed mid-read has an invalid record.
+
 Every run directory is created before model initialization and contains an atomically
 updated `run.json`. It records phase/status, timings, versions, settings, counts, model
 revisions/checksums, and output paths. Per-file failures are immediately written to
 `failures.csv`. Ctrl-C marks the run interrupted; cached successes remain resumable.
 
 `evaluation.csv` is written atomically and retains full-precision metrics. Display
-rounding occurs only in the terminal.
+rounding occurs only in the terminal. It is written once before the export prompt, so a
+completed evaluation pass survives an interrupt or a rejected selection value, and
+rewritten after selection with the `portfolio_selected` column populated. The interval
+spent waiting at the prompt is timed as the `awaiting_selection` phase, so operator idle
+time is not billed to ranking.
 
 ## 7. Terminal interface
 
@@ -137,7 +146,10 @@ The Rich interface is scrollback-safe rather than full-screen:
 6. Export confirmation panel.
 
 `--plain` disables animation and color. `--select N|all|none` supports scripts and CI.
-EOF is treated as `none`, and Ctrl-C exits with code 130 after updating the run audit.
+Its format is validated with the other options before discovery, so a malformed value
+fails immediately rather than after a complete evaluation pass; the count is validated
+against the burst-winner total after ranking, when that total is known. EOF is treated as
+`none`, and Ctrl-C exits with code 130 after updating the run audit.
 
 ## 8. Portfolio review and feedback
 
@@ -146,7 +158,16 @@ feedback CSV download. A later `--feedback` CSV pins keeps and removes rejects.
 
 `--diversity` uses maximal marginal relevance over normalized CLIP embeddings to trade
 off composite quality against similarity to already selected images. Zero is pure
-quality ranking; one maximizes novelty.
+quality ranking; one maximizes novelty. Similarity is held as a running per-candidate
+maximum against the selected set and updated with one matrix-vector product per pick, so
+selection cost is proportional to picks times candidates rather than to the square of the
+picks.
+
+Diversity determines the selected set, not its order. The returned selection is always
+sorted by composite score, then by normalized path, so `portfolio_selection_order`, the
+XMP rating bands, and the review page agree with measured quality. Feedback keeps are
+forced into the selection and may exceed the requested count, but they do not occupy the
+first position. Ties resolve identically at every diversity value.
 
 `photo-cull-validate` compares feedback with an evaluation and reports precision at the
 number of keeps, keep-versus-reject pairwise accuracy, and mean global ranks. Compatible
@@ -162,6 +183,13 @@ refuses existing destinations. Each copy is published through a temporary file.
 
 `export_manifest.csv` records source, destination, and size. `--write-xmp` creates or
 updates ratings only inside `picks/`, never in the source tree.
+
+Sidecar matching uses the same `logical_asset_stem` rule as discovery and export, so a
+sidecar is claimed only for its own asset family: `IMG_0001.xmp` and `IMG_0001.ARW.xmp`
+match `IMG_0001.ARW`, while `IMG_0001.v2.xmp` does not. When several sidecars match, the
+shortest name wins, then the normalized name, so the choice is deterministic. The writer
+emits exactly one `xmp:Rating` and one `xmp:Label`, removing any other attribute-form or
+child-element-form copy across every `rdf:Description`, and preserves unrelated metadata.
 
 ## 10. Reproducibility and verification
 

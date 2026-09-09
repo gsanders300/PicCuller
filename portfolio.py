@@ -47,7 +47,12 @@ def select_portfolio_candidates(
     diversity_strength: float = 0.0,
     feedback: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Select high-quality candidates with optional CLIP-space diversity."""
+    """Select high-quality candidates with optional CLIP-space diversity.
+
+    The result is ordered by composite score, so selection rank and any rating
+    derived from it always agree with measured quality. Feedback keeps are still
+    forced into the selection, but they no longer displace better-scoring images.
+    """
     if count < 0:
         raise ValueError("Selection count cannot be negative")
     if not 0.0 <= diversity_strength <= 1.0:
@@ -55,58 +60,113 @@ def select_portfolio_candidates(
 
     feedback = feedback or {}
     eligible = [
-        candidate
-        for candidate in candidates
-        if feedback.get(str(Path(candidate["file_path"]).resolve())) != "reject"
+        candidate for candidate in candidates if _decision(candidate, feedback) != "reject"
     ]
-    eligible.sort(
-        key=lambda candidate: (
-            -float(candidate["composite_score"]),
-            str(candidate["file_path"]).casefold(),
-        )
-    )
-    pinned = [
-        candidate
-        for candidate in eligible
-        if feedback.get(str(Path(candidate["file_path"]).resolve())) == "keep"
-    ]
-    selected = list(pinned)
-    selected_paths = {str(Path(item["file_path"]).resolve()) for item in selected}
+    eligible.sort(key=_quality_key)
+    pinned = [candidate for candidate in eligible if _decision(candidate, feedback) == "keep"]
+    pinned_identities = {_identity(candidate) for candidate in pinned}
     available = [
-        candidate
-        for candidate in eligible
-        if str(Path(candidate["file_path"]).resolve()) not in selected_paths
+        candidate for candidate in eligible if _identity(candidate) not in pinned_identities
     ]
     target_count = min(len(eligible), max(count, len(pinned)))
 
     if diversity_strength == 0.0:
-        return (selected + available)[:target_count]
+        remaining = max(0, target_count - len(pinned))
+        selected = pinned + available[:remaining]
+    else:
+        selected = _select_with_diversity(
+            pinned,
+            available,
+            eligible,
+            target_count,
+            diversity_strength,
+        )
+
+    return sorted(selected, key=_quality_key)
+
+
+def _select_with_diversity(
+    pinned: list[dict[str, Any]],
+    available: list[dict[str, Any]],
+    eligible: list[dict[str, Any]],
+    target_count: int,
+    diversity_strength: float,
+) -> list[dict[str, Any]]:
+    """Run maximal marginal relevance over normalized CLIP embeddings.
+
+    Similarity is kept as a running per-candidate maximum against the already
+    selected set, so each pick costs one matrix-vector product instead of
+    recomputing every pair. That is O(K x N x D) rather than O(K^2 x N x D).
+    """
+    # numpy stays a local import: portfolio is reachable from the CLI help and
+    # cache-only paths, which must not initialize the machine-learning stack.
+    import numpy as np
+
+    selected = list(pinned)
+    if not available or len(selected) >= target_count:
+        return selected
 
     qualities = [float(candidate["composite_score"]) for candidate in eligible]
     minimum_quality = min(qualities, default=0.0)
     quality_span = max(qualities, default=0.0) - minimum_quality
 
-    while available and len(selected) < target_count:
+    embeddings = np.asarray(
+        [np.asarray(candidate["embedding"], dtype=np.float32) for candidate in available]
+    )
+    scores = np.asarray(
+        [float(candidate["composite_score"]) for candidate in available],
+        dtype=np.float64,
+    )
+    quality = (
+        (scores - minimum_quality) / quality_span
+        if quality_span > 0
+        else np.ones(len(available), dtype=np.float64)
+    )
+    paths = [str(candidate["file_path"]).casefold() for candidate in available]
 
-        def objective(candidate: dict[str, Any]) -> tuple[float, float, str]:
-            quality = (
-                (float(candidate["composite_score"]) - minimum_quality) / quality_span
-                if quality_span > 0
-                else 1.0
-            )
-            maximum_similarity = (
-                max((_cosine_similarity(candidate, chosen) + 1.0) / 2.0 for chosen in selected)
-                if selected
-                else 0.0
-            )
-            score = (1.0 - diversity_strength) * quality - diversity_strength * maximum_similarity
-            return score, quality, str(candidate["file_path"]).casefold()
+    if selected:
+        chosen_embeddings = np.asarray(
+            [np.asarray(candidate["embedding"], dtype=np.float32) for candidate in selected]
+        )
+        maximum_similarity = ((embeddings @ chosen_embeddings.T) + 1.0) / 2.0
+        maximum_similarity = maximum_similarity.max(axis=1).astype(np.float64)
+    else:
+        maximum_similarity = np.zeros(len(available), dtype=np.float64)
 
-        chosen = max(available, key=objective)
-        selected.append(chosen)
-        available.remove(chosen)
+    unselected = np.ones(len(available), dtype=bool)
+    while len(selected) < target_count and bool(unselected.any()):
+        objective = (1.0 - diversity_strength) * quality
+        objective -= diversity_strength * maximum_similarity
+        objective = np.where(unselected, objective, -np.inf)
+        # Ties resolve by higher quality, then by normalized path order, matching
+        # the pure-quality path so the diversity value cannot reverse a tie.
+        tied = np.flatnonzero(objective == objective.max())
+        index = (
+            int(tied[0])
+            if tied.size == 1
+            else int(min(tied, key=lambda position: (-quality[position], paths[position])))
+        )
+        selected.append(available[index])
+        unselected[index] = False
+        np.maximum(
+            maximum_similarity,
+            ((embeddings @ embeddings[index]) + 1.0) / 2.0,
+            out=maximum_similarity,
+        )
 
     return selected
+
+
+def _identity(candidate: dict[str, Any]) -> str:
+    return str(Path(candidate["file_path"]).resolve())
+
+
+def _decision(candidate: dict[str, Any], feedback: dict[str, str]) -> str:
+    return feedback.get(_identity(candidate), "")
+
+
+def _quality_key(candidate: dict[str, Any]) -> tuple[float, str]:
+    return -float(candidate["composite_score"]), str(candidate["file_path"]).casefold()
 
 
 def write_feedback_template(
@@ -196,10 +256,3 @@ document.querySelector('#download').onclick=()=>{{let csv='file_path,decision\\n
 </script></body></html>"""
     atomic_write_text(destination, document)
     return len(cards), failures
-
-
-def _cosine_similarity(first: dict[str, Any], second: dict[str, Any]) -> float:
-    return sum(
-        float(first_value) * float(second_value)
-        for first_value, second_value in zip(first["embedding"], second["embedding"], strict=True)
-    )

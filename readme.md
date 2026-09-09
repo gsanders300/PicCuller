@@ -278,7 +278,7 @@ for that operation. Photo Cull does not cache the new evaluations from that fall
 
 | Option | Default | Instruction |
 | --- | --- | --- |
-| `--select N|all|none` | Interactive prompt or `none` | Select the export quantity. `N` must be from one through the number of burst winners. |
+| `--select N|all|none` | Interactive prompt or `none` | Select the export quantity. `N` must be from one through the number of burst winners. Photo Cull checks the format before it evaluates any image, and checks the count against the winners after it ranks them. |
 | `--diversity NUMBER` | `0.0` | Set the portfolio diversity strength. Use a value from zero through one. |
 | `--feedback PATH` | None | Apply decisions from a feedback CSV file. |
 | `--contact-sheet INTEGER` | `100` | Set the maximum number of review thumbnails. Use zero to disable the review page. |
@@ -587,6 +587,12 @@ combines normalized composite quality with similarity to prior selections.
 Use a small value first. A value from 0.1 through 0.3 usually gives quality more weight
 than novelty. Validate the value with your own photographs.
 
+Diversity changes which photographs Photo Cull selects. It does not change their order:
+the exported selection is always in composite-score order, so the selection position and
+any XMP rating agree with measured quality. Equal scores resolve by normalized path
+order, which is the same rule the pure-quality path uses, so a diversity value cannot
+reverse a tie.
+
 ### Use XMP ratings
 
 Use `--write-xmp` only when you also export one or more selections. Photo Cull creates
@@ -602,6 +608,20 @@ The program applies the green label and these ratings:
 
 Photo Cull changes an existing XMP sidecar only after it copies that sidecar to the
 export directory. The source sidecar does not change.
+
+Sidecar matching uses the same asset-family rule as discovery and export. A sidecar
+belongs to `IMG_0001.ARW` when it is named `IMG_0001.xmp` or `IMG_0001.ARW.xmp`. A file
+such as `IMG_0001.v2.xmp` belongs to a different asset, so Photo Cull leaves it alone and
+creates `IMG_0001.xmp` instead.
+
+A sidecar can hold a rating as an attribute or as a child element, and can contain more
+than one description. Photo Cull writes exactly one rating and one label, and removes any
+other copy, so the exported sidecar never carries two conflicting ratings. Other metadata
+in the sidecar is preserved.
+
+Feedback keeps are forced into the selection, but they do not take the first position.
+The selection position always follows the composite score, so the best photograph
+receives the highest rating.
 
 Test XMP import with your version of Lightroom, Capture One, or darktable before you
 use the ratings in a production workflow.
@@ -709,6 +729,11 @@ Photo Cull updates this file when a failure occurs. An empty file has only the h
 A failure for one image does not stop other images. The operation stops if no image
 has a successful evaluation.
 
+The `stage` column names the step that failed. A `cache_write` row means the evaluation
+finished but Photo Cull could not store it. That image still ranks and still exports; only
+the resumable cache record is lost. A `checkpoint` row means the file changed while Photo
+Cull read it, which is the one condition that discards a completed evaluation.
+
 ### `feedback.csv`
 
 This file is the editable feedback template. It contains all successful candidates.
@@ -782,6 +807,10 @@ cache schema, move the cache to a backup location. Then start Photo Cull again.
 Press Ctrl+C one time to stop an operation. Photo Cull marks the audit as
 `interrupted` and returns exit code 130. Completed image evaluations remain in the
 cache.
+
+Photo Cull writes `evaluation.csv` before it asks for the export quantity. An interrupt
+at that prompt keeps the complete metrics file. The `portfolio_selected` column is `False`
+in that file, because no selection occurred.
 
 Start the same command again to continue. Photo Cull reuses valid cache records and
 evaluates the remaining images.

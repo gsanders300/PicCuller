@@ -503,7 +503,16 @@ def _execute_pipeline(
         record["portfolio_selected"] = False
 
     _show_summary(winners)
-    requested_count = _selection_count(config.selection, len(winners), config)
+
+    # Persist the expensive metrics before the interactive prompt. An interrupt or
+    # a rejected selection value must not discard a completed evaluation pass.
+    audit.set_phase("reporting")
+    evaluation_file = run_dir / "evaluation.csv"
+    _write_evaluation_csv(evaluation_file, records)
+    audit.add_output("evaluation", evaluation_file)
+
+    audit.set_phase("awaiting_selection")
+    requested_count = _selection_count(config.selection, len(winners))
     candidate_pool = list(winners)
     candidate_paths = {record["file_path"] for record in candidate_pool}
     candidate_pool.extend(
@@ -524,13 +533,8 @@ def _execute_pipeline(
     audit.set_count("selected", len(selected))
 
     audit.set_phase("reporting")
-    evaluation_file = run_dir / "evaluation.csv"
-    atomic_write_csv(
-        evaluation_file,
-        REPORT_FIELDS,
-        (_report_row(record) for record in _global_quality_order(records)),
-    )
-    audit.add_output("evaluation", evaluation_file)
+    # Rewrite with the selection columns now populated.
+    _write_evaluation_csv(evaluation_file, records)
 
     feedback_template = run_dir / "feedback.csv"
     write_feedback_template(
@@ -781,20 +785,31 @@ def _evaluate_pending(
                 try:
                     if FileFingerprint.from_path(item.file_path) != item.fingerprint:
                         raise RuntimeError("File changed while it was being evaluated")
-                    if evaluation_cache is not None:
+                except Exception as error:
+                    # A file that changed while it was read has an invalid record,
+                    # so this stays the one condition that discards the result.
+                    audit.record_failure(item.file_path, "checkpoint", error)
+                    _warning(f"Skipped {item.file_path}: {error}")
+                    progress.advance(task)
+                    continue
+
+                if evaluation_cache is not None:
+                    try:
                         evaluation_cache.put(
                             item.file_path,
                             item.fingerprint,
                             cache_signature,
                             record_to_cache(record),
                         )
-                    evaluated.append(record)
-                    completed_count += 1
-                    progress.advance(task)
-                except Exception as error:
-                    audit.record_failure(item.file_path, "checkpoint", error)
-                    _warning(f"Skipped {item.file_path}: {error}")
-                    progress.advance(task)
+                    except Exception as error:
+                        # A failed commit degrades to an uncached success. The
+                        # evaluation is complete, so it still ranks and exports.
+                        audit.record_failure(item.file_path, "cache_write", error)
+                        _warning(f"Could not cache {item.file_path}: {error}")
+
+                evaluated.append(record)
+                completed_count += 1
+                progress.advance(task)
             audit.set_count("evaluated", completed_count)
 
             if next_batch is None or next_futures is None:
@@ -919,7 +934,15 @@ def _show_summary(winners: list[dict[str, Any]]) -> None:
     console.print(f"[cyan]Found {len(winners)} unique candidates.[/cyan]")
 
 
-def _selection_count(value: str | None, available: int, config: PipelineConfig) -> int:
+def _write_evaluation_csv(destination: Path, records: list[dict[str, Any]]) -> None:
+    atomic_write_csv(
+        destination,
+        REPORT_FIELDS,
+        (_report_row(record) for record in _global_quality_order(records)),
+    )
+
+
+def _selection_count(value: str | None, available: int) -> int:
     if value is None and console.is_terminal and sys.stdin.isatty():
         try:
             value = console.input(
@@ -965,7 +988,27 @@ def _cache_signature(
     )
 
 
+def _validate_selection(value: str | None) -> None:
+    """Reject a malformed --select before any evaluation work begins.
+
+    The count is still checked against the available candidates later, because
+    that number is only known after ranking.
+    """
+    if value is None:
+        return
+    normalized = value.strip().casefold()
+    if normalized in {"", "none", "skip", "all"}:
+        return
+    try:
+        count = int(normalized)
+    except ValueError:
+        raise ValueError("--select must be a positive integer, 'all', or 'none'") from None
+    if count < 0:
+        raise ValueError("--select cannot be negative")
+
+
 def _validate_config(config: PipelineConfig) -> None:
+    _validate_selection(config.selection)
     if config.time_window < 0:
         raise ValueError("--burst-window cannot be negative")
     if config.max_burst_duration < config.time_window:
