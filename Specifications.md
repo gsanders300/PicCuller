@@ -12,13 +12,20 @@ WebP, TIFF, and BMP. Actual RAW decoding remains subject to the bundled LibRaw b
 
 Generated `.photo-cull` and timestamped legacy output directories must never be
 rediscovered as source input. Discovery order is deterministic and symbolic-link
-directories are not followed.
+directories are not followed. Discovery also excludes AppleDouble companions whose names
+begin with `._`, and operating-system directories that hold deleted or derived copies
+(`.Trashes`, `.Spotlight-V100`, `.fseventsd`, `.TemporaryItems`, `@eaDir`,
+`$RECYCLE.BIN`, `System Volume Information`, and `lost+found`). An unreadable directory
+is reported as a `discovery` failure rather than silently omitted.
 
 ## 2. Metadata and ingestion
 
 The preferred `auto` metadata backend uses one bulk ExifTool process when `exiftool`
 is available. It reads capture/create time, subseconds, UTC offset, camera identity,
-image/sequence number, and available AF-point descriptions.
+image/sequence number, and available AF-point descriptions. Its output is decoded as
+UTF-8 rather than the console locale, so a non-ASCII path cannot lose metadata on
+Windows, and the call carries a deadline that scales with the collection size, so a
+stalled mount cannot hang the run.
 
 The fallback reads standard and nested EXIF IFDs from the same Pillow/RAW-preview
 decode used for scoring. Missing offsets use `--assume-timezone` when supplied,
@@ -124,8 +131,19 @@ a `checkpoint` failure, because a file that changed mid-read has an invalid reco
 
 Every run directory is created before model initialization and contains an atomically
 updated `run.json`. It records phase/status, timings, versions, settings, counts, model
-revisions/checksums, and output paths. Per-file failures are immediately written to
-`failures.csv`. Ctrl-C marks the run interrupted; cached successes remain resumable.
+revisions/checksums, and output paths. Ctrl-C marks the run interrupted; cached successes
+remain resumable.
+
+Alongside wall-clock phase timings, which overlap because decoding runs while inference
+uses the previous batch, `run.json` records `stage_seconds` and `stage_counts`: aggregate
+worker time and image count for `decode`, `cpu_metrics`, `phash`, `musiq`, `clip`, and
+`portrait`. These are the values a throughput comparison uses. A fully cached run records
+none, because it evaluates nothing.
+
+Per-file failures reach `failures.csv` immediately. Rows are appended and flushed rather
+than rewritten, because a run against an unsupported RAW format fails every image and a
+full rewrite per failure is quadratic. The file therefore trades whole-file atomic
+replacement for append-with-flush; every other report keeps atomic replacement.
 
 `evaluation.csv` is written atomically and retains full-precision metrics. Display
 rounding occurs only in the terminal. It is written once before the export prompt, so a

@@ -11,6 +11,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from rich.console import Console
@@ -144,6 +145,9 @@ class PreparedImage:
     crushed_pct: float
     exposure_penalty: float
     phash: Any
+    decode_seconds: float = 0.0
+    metrics_seconds: float = 0.0
+    phash_seconds: float = 0.0
     face_count: int = 0
     eye_count: int = 0
     eye_factor: float = 1.0
@@ -278,9 +282,14 @@ def run_pipeline(config: PipelineConfig) -> int:
         return 2
     _validate_config(config)
 
+    # Discovery runs before the audit directory exists, so unreadable directories
+    # are collected here and recorded as soon as the audit is available.
+    discovery_errors: list[OSError] = []
     with _status("Scanning source files", config):
-        discovered = discover_image_files(folder, output_root)
+        discovered = discover_image_files(folder, output_root, discovery_errors.append)
         all_files = select_primary_images(discovered, config.primary)
+    for error in discovery_errors:
+        _warning(f"Could not read {getattr(error, 'filename', None) or 'a directory'}: {error}")
     if not all_files:
         console.print("[yellow]No supported images found.[/yellow]")
         return 0
@@ -310,6 +319,12 @@ def run_pipeline(config: PipelineConfig) -> int:
         discovered_count=len(discovered),
     )
     audit.data["counts"]["primary_candidates"] = len(all_files)
+    for error in discovery_errors:
+        audit.record_failure(
+            Path(error.filename) if getattr(error, "filename", None) else None,
+            "discovery",
+            error,
+        )
 
     try:
         return _execute_pipeline(
@@ -703,11 +718,16 @@ def _evaluate_pending(
             prepared: list[PreparedImage] = []
             for (file_path, _), future in zip(current_batch, current_futures, strict=True):
                 try:
-                    prepared.append(future.result())
+                    item = future.result()
                 except Exception as error:
                     audit.record_failure(file_path, "decode", error)
                     _warning(f"Skipped {file_path}: {error}")
                     progress.advance(task)
+                    continue
+                prepared.append(item)
+                audit.accumulate_stage("decode", item.decode_seconds)
+                audit.accumulate_stage("cpu_metrics", item.metrics_seconds)
+                audit.accumulate_stage("phash", item.phash_seconds)
 
             next_batch = next(batches, None)
             next_futures = submit_batch(next_batch) if next_batch is not None else None
@@ -715,7 +735,9 @@ def _evaluate_pending(
             if profile.name == "portrait":
                 for item in prepared:
                     try:
+                        started = perf_counter()
                         portrait = analyze_portrait(item.loaded.cv_image)
+                        audit.accumulate_stage("portrait", perf_counter() - started)
                         item.face_count = portrait.face_count
                         item.eye_count = portrait.eye_count
                         item.eye_factor = portrait.eye_factor
@@ -727,7 +749,9 @@ def _evaluate_pending(
             musiq_ready: list[PreparedImage] = []
             for item in prepared:
                 try:
+                    started = perf_counter()
                     item.musiq_score = runtime.infer_musiq(item.loaded.cv_image)
+                    audit.accumulate_stage("musiq", perf_counter() - started)
                     musiq_ready.append(item)
                 except Exception as error:
                     audit.record_failure(item.file_path, "musiq", error)
@@ -737,17 +761,21 @@ def _evaluate_pending(
             inference_results: list[Any] = []
             if musiq_ready:
                 try:
+                    started = perf_counter()
                     inference_results = runtime.infer_clip_batch(
                         [item.loaded.pil_image for item in musiq_ready]
                     )
+                    audit.accumulate_stage("clip", perf_counter() - started, len(musiq_ready))
                 except Exception:
                     inference_results = []
                     isolated_items: list[PreparedImage] = []
                     for item in musiq_ready:
                         try:
+                            started = perf_counter()
                             inference_results.extend(
                                 runtime.infer_clip_batch([item.loaded.pil_image])
                             )
+                            audit.accumulate_stage("clip", perf_counter() - started)
                             isolated_items.append(item)
                         except Exception as error:
                             audit.record_failure(item.file_path, "clip", error)
@@ -830,15 +858,20 @@ def _prepare_image(
 
     from image_loader import load_image
 
+    started = perf_counter()
     loaded = load_image(
         file_path,
         max_dim=MAX_IMAGE_DIMENSION,
         metadata=metadata,
         assumed_timezone=assumed_timezone,
     )
+    decoded_at = perf_counter()
     focus_score = calculate_top_percentile_focus(loaded.cv_image)
     blown_fraction, crushed_fraction, exposure_penalty = check_exposure_clipping(loaded.cv_image)
-    result = PreparedImage(
+    measured_at = perf_counter()
+    phash = imagehash.phash(loaded.pil_image)
+    hashed_at = perf_counter()
+    return PreparedImage(
         file_path=file_path,
         fingerprint=fingerprint,
         loaded=loaded,
@@ -846,9 +879,11 @@ def _prepare_image(
         blown_pct=blown_fraction * 100.0,
         crushed_pct=crushed_fraction * 100.0,
         exposure_penalty=exposure_penalty,
-        phash=imagehash.phash(loaded.pil_image),
+        phash=phash,
+        decode_seconds=decoded_at - started,
+        metrics_seconds=measured_at - decoded_at,
+        phash_seconds=hashed_at - measured_at,
     )
-    return result
 
 
 def _assign_ranks(records: list[dict[str, Any]]) -> list[dict[str, Any]]:

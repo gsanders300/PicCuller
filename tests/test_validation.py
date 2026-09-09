@@ -4,8 +4,9 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from validation import evaluate_feedback
+from validation import _common_input_root, evaluate_feedback
 
 
 class ValidationTests(unittest.TestCase):
@@ -50,6 +51,42 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(result["pairwise_accuracy"], 1.0)
         self.assertEqual(result["mean_keep_global_rank"], 1.0)
         self.assertEqual(result["mean_reject_global_rank"], 3.0)
+
+
+class CommonInputRootTests(unittest.TestCase):
+    """The upward walk could not terminate: a filesystem root is its own parent."""
+
+    def test_nested_paths_resolve_to_their_shared_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            (root / "day-one").mkdir()
+            (root / "day-two").mkdir()
+            rows = [
+                {"file_path": str(root / "day-one" / "a.jpg")},
+                {"file_path": str(root / "day-two" / "b.jpg")},
+            ]
+
+            self.assertEqual(_common_input_root(rows), root)
+
+    def test_a_single_row_resolves_to_its_own_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            rows = [{"file_path": str(root / "only.jpg")}]
+
+            self.assertEqual(_common_input_root(rows), root)
+
+    def test_rows_without_a_shared_root_raise_instead_of_hanging(self) -> None:
+        # On Windows two drives share no root, and Path("C:/").parent is Path("C:/"),
+        # so the previous upward walk spun forever. Simulated here with a patched
+        # commonpath so the behavior is asserted on every platform.
+        rows = [{"file_path": "/a/one.jpg"}, {"file_path": "/b/two.jpg"}]
+        with (
+            patch("validation.os.path.commonpath", side_effect=ValueError("different drives")),
+            self.assertRaises(ValueError) as raised,
+        ):
+            _common_input_root(rows)
+
+        self.assertIn("common directory", str(raised.exception))
 
 
 if __name__ == "__main__":

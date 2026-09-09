@@ -40,6 +40,67 @@ class FileOperationsTests(unittest.TestCase):
                 ["session/a.arw", "session/B.JPG"],
             )
 
+    def test_appledouble_companions_are_not_discovered(self) -> None:
+        """macOS writes ._NAME.ARW beside originals on exFAT and FAT media."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            (root / "IMG_0001.ARW").touch()
+            (root / "._IMG_0001.ARW").touch()
+            (root / "._IMG_0002.JPG").touch()
+
+            discovered = discover_image_files(root)
+
+            self.assertEqual([path.name for path in discovered], ["IMG_0001.ARW"])
+
+    def test_system_directories_are_pruned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            (root / "keep.jpg").touch()
+            for name in (
+                ".Trashes",
+                ".Spotlight-V100",
+                "@eaDir",
+                "$RECYCLE.BIN",
+                "System Volume Information",
+                ".fseventsd",
+            ):
+                directory = root / name
+                directory.mkdir()
+                (directory / "deleted.jpg").touch()
+
+            discovered = discover_image_files(root)
+
+            self.assertEqual([path.name for path in discovered], ["keep.jpg"])
+
+    def test_an_unreadable_directory_is_reported_not_hidden(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            (root / "readable").mkdir()
+            (root / "readable" / "a.jpg").touch()
+            blocked = root / "blocked"
+            blocked.mkdir()
+            (blocked / "b.jpg").touch()
+            blocked.chmod(0o000)
+            try:
+                try:
+                    list(blocked.iterdir())
+                except PermissionError:
+                    enforced = True
+                else:
+                    enforced = False
+
+                if not enforced:
+                    self.skipTest("This user can read a directory with mode 000")
+
+                errors: list[OSError] = []
+                discovered = discover_image_files(root, None, errors.append)
+
+                self.assertEqual([path.name for path in discovered], ["a.jpg"])
+                self.assertEqual(len(errors), 1)
+                self.assertIn("blocked", str(errors[0].filename))
+            finally:
+                blocked.chmod(0o700)
+
     def test_compound_sidecars_are_included_in_asset_family(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()

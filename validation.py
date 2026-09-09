@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -59,11 +60,21 @@ def evaluate_feedback(
 
 
 def _common_input_root(rows: list[dict[str, str]]) -> Path:
+    """Find the directory every evaluated file sits beneath.
+
+    Walking upward with `Path.parent` cannot terminate when two rows sit on
+    different roots, because a root is its own parent: on Windows,
+    `Path("C:/").parent == Path("C:/")`.
+    """
     paths = [Path(row["file_path"]).resolve() for row in rows]
-    common = Path(paths[0]).parent
-    while not all(path == common or common in path.parents for path in paths):
-        common = common.parent
-    return common
+    try:
+        common = Path(os.path.commonpath(paths))
+    except ValueError as error:
+        raise ValueError(
+            "Evaluation rows do not share a common directory, so they cannot describe "
+            "one collection. Check that the CSV came from a single run."
+        ) from error
+    return common if common.is_dir() else common.parent
 
 
 def _mean_rank(rows: list[dict[str, str]]) -> float | None:

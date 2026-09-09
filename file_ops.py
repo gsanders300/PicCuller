@@ -7,7 +7,7 @@ import re
 import shutil
 import tempfile
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +40,22 @@ GENERATED_DIRECTORY_PATTERN = re.compile(
     r"^(?:picks|run)_\d{8}_\d{6}(?:_\d{6})?$",
     re.IGNORECASE,
 )
+# Operating-system bookkeeping directories that hold deleted or derived copies.
+# Culling those as if they were originals wastes inference and pollutes ranking.
+SYSTEM_DIRECTORY_NAMES = {
+    ".fseventsd",
+    ".spotlight-v100",
+    ".temporaryitems",
+    ".trash",
+    ".trashes",
+    "$recycle.bin",
+    "@eadir",
+    "lost+found",
+    "system volume information",
+}
+# AppleDouble companions appear whenever macOS writes to exFAT or FAT media. They
+# carry an image extension but no image data, so they only ever fail to decode.
+APPLEDOUBLE_PREFIX = "._"
 
 
 class ExportCollisionError(RuntimeError):
@@ -68,16 +84,34 @@ def _is_generated_directory(path: Path, output_root: Path | None) -> bool:
         resolved == output_root or _is_relative_to(resolved, output_root)
     ):
         return True
+    if path.name.casefold() in SYSTEM_DIRECTORY_NAMES:
+        return True
     return path.name == ".photo-cull" or bool(GENERATED_DIRECTORY_PATTERN.fullmatch(path.name))
 
 
-def discover_image_files(folder: Path, output_root: Path | None = None) -> list[Path]:
-    """Return supported images deterministically while pruning generated output."""
+def discover_image_files(
+    folder: Path,
+    output_root: Path | None = None,
+    on_error: Callable[[OSError], None] | None = None,
+) -> list[Path]:
+    """Return supported images deterministically while pruning generated output.
+
+    An unreadable directory is reported through `on_error` rather than silently
+    omitted, so a permission problem cannot quietly shrink the candidate set.
+    """
     folder = folder.resolve()
     output_root = output_root.resolve() if output_root is not None else None
     discovered: list[Path] = []
 
-    for current_root, directory_names, file_names in os.walk(folder, followlinks=False):
+    def handle_error(error: OSError) -> None:
+        if on_error is not None:
+            on_error(error)
+
+    for current_root, directory_names, file_names in os.walk(
+        folder,
+        followlinks=False,
+        onerror=handle_error,
+    ):
         current_path = Path(current_root)
         directory_names[:] = sorted(
             (
@@ -88,6 +122,8 @@ def discover_image_files(folder: Path, output_root: Path | None = None) -> list[
             key=str.casefold,
         )
         for name in sorted(file_names, key=str.casefold):
+            if name.startswith(APPLEDOUBLE_PREFIX):
+                continue
             candidate = current_path / name
             if (
                 candidate.suffix.casefold() in ALL_IMAGE_EXTENSIONS

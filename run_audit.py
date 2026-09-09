@@ -12,9 +12,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 RUN_MANIFEST_SCHEMA_VERSION = 1
+FAILURE_FIELDS = ("file_path", "stage", "error_type", "message")
 
 
 def utc_now() -> str:
@@ -44,7 +45,9 @@ class RunAudit:
         self.run_dir = run_dir
         self.manifest_path = run_dir / "run.json"
         self.failures_path = run_dir / "failures.csv"
-        self.failures: list[dict[str, str]] = []
+        self.failure_count = 0
+        self._failures_handle: TextIO | None = None
+        self._failures_writer: csv.DictWriter | None = None
         self._phase_started = time.perf_counter()
         self.data: dict[str, Any] = {
             "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
@@ -67,7 +70,6 @@ class RunAudit:
                         "imagehash",
                         "numpy",
                         "opencv-python",
-                        "pandas",
                         "Pillow",
                         "pyiqa",
                         "rawpy",
@@ -88,8 +90,14 @@ class RunAudit:
             },
             "outputs": {},
             "timings_seconds": {},
+            # Aggregate worker time per pipeline stage, with the number of images
+            # each stage handled. Phase timings are wall clock and overlap; these
+            # are what a throughput comparison actually needs.
+            "stage_seconds": {},
+            "stage_counts": {},
         }
         self.run_dir.mkdir(parents=True, exist_ok=False)
+        self._open_failures()
         self._write_manifest()
 
     def set_phase(self, phase: str) -> None:
@@ -110,8 +118,21 @@ class RunAudit:
         self.data["outputs"][name] = str(path)
         self._write_manifest()
 
+    def accumulate_stage(self, name: str, seconds: float, count: int = 1) -> None:
+        """Add aggregate time and image count for one pipeline stage.
+
+        This deliberately does not rewrite the manifest: it is called once per
+        image, and the next phase or count update flushes it.
+        """
+        seconds_by_stage = self.data["stage_seconds"]
+        seconds_by_stage[name] = round(float(seconds_by_stage.get(name, 0.0)) + seconds, 6)
+        counts_by_stage = self.data["stage_counts"]
+        counts_by_stage[name] = int(counts_by_stage.get(name, 0)) + count
+
     def record_failure(self, file_path: Path | None, stage: str, error: BaseException) -> None:
-        self.failures.append(
+        self.failure_count += 1
+        self.data["counts"]["failed"] = self.failure_count
+        self._append_failure(
             {
                 "file_path": "" if file_path is None else str(file_path),
                 "stage": stage,
@@ -119,8 +140,6 @@ class RunAudit:
                 "message": str(error),
             }
         )
-        self.data["counts"]["failed"] = len(self.failures)
-        self._write_failures()
         self._write_manifest()
 
     def finish(self, status: str = "completed") -> None:
@@ -128,8 +147,46 @@ class RunAudit:
         self.data["status"] = status
         self.data["phase"] = status
         self.data["completed_at"] = utc_now()
-        self._write_failures()
+        self._close_failures()
         self._write_manifest()
+
+    def _open_failures(self) -> None:
+        """Open failures.csv once and write its header.
+
+        Failures are appended and flushed one row at a time. Rewriting the whole
+        file per failure is quadratic, and a run against an unsupported RAW format
+        fails every image, so the count is unbounded.
+        """
+        self.failures_path.parent.mkdir(parents=True, exist_ok=True)
+        self._failures_handle = self.failures_path.open("w", newline="", encoding="utf-8")
+        self._failures_writer = csv.DictWriter(
+            self._failures_handle,
+            fieldnames=FAILURE_FIELDS,
+            extrasaction="ignore",
+        )
+        self._failures_writer.writeheader()
+        self._failures_handle.flush()
+
+    def _append_failure(self, row: Mapping[str, Any]) -> None:
+        if self._failures_handle is None or self._failures_writer is None:
+            # After finish(), fall back to a full atomic rewrite is not possible
+            # without retaining rows, so append directly instead.
+            with self.failures_path.open("a", newline="", encoding="utf-8") as handle:
+                csv.DictWriter(
+                    handle, fieldnames=FAILURE_FIELDS, extrasaction="ignore"
+                ).writerow({key: _safe_csv_value(value) for key, value in row.items()})
+            return
+        self._failures_writer.writerow(
+            {key: _safe_csv_value(value) for key, value in row.items()}
+        )
+        self._failures_handle.flush()
+
+    def _close_failures(self) -> None:
+        if self._failures_handle is not None:
+            self._failures_handle.flush()
+            self._failures_handle.close()
+            self._failures_handle = None
+            self._failures_writer = None
 
     def _finish_phase_timing(self) -> None:
         phase = str(self.data.get("phase", "unknown"))
@@ -144,10 +201,6 @@ class RunAudit:
             self.manifest_path,
             json.dumps(self.data, indent=2, sort_keys=True) + "\n",
         )
-
-    def _write_failures(self) -> None:
-        fieldnames = ("file_path", "stage", "error_type", "message")
-        atomic_write_csv(self.failures_path, fieldnames, self.failures)
 
 
 def atomic_write_text(destination: Path, content: str) -> None:

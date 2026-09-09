@@ -134,6 +134,61 @@ class PipelineIntegrationTests(unittest.TestCase):
             self.assertIn("generated_xmp", export_manifest)
 
 
+class StageInstrumentationTests(unittest.TestCase):
+    """Per-phase wall clock overlaps, so throughput work needs per-stage totals."""
+
+    def test_run_json_reports_per_stage_seconds_and_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+
+            self.assertEqual(run_with_mocks(build_config(source, output)), 0)
+            manifest = read_manifest(latest_run(output))
+
+            for stage in ("decode", "cpu_metrics", "phash", "musiq", "clip"):
+                with self.subTest(stage=stage):
+                    self.assertIn(stage, manifest["stage_seconds"])
+                    self.assertGreaterEqual(manifest["stage_seconds"][stage], 0.0)
+                    self.assertEqual(manifest["stage_counts"][stage], 2)
+
+    def test_a_cached_run_records_no_evaluation_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+            config = build_config(source, output, cache_mode="use", selection="none")
+
+            run_with_mocks(config)
+            run_with_mocks(config)
+
+            self.assertEqual(read_manifest(latest_run(output))["stage_seconds"], {})
+
+
+class DiscoveryReportingTests(unittest.TestCase):
+    def test_appledouble_and_system_directories_never_reach_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+            # Both are routine on a Mac-written exFAT card and neither is an image.
+            (source / "day-one" / "._same.jpg").write_bytes(b"appledouble stub")
+            trashes = source / ".Trashes"
+            trashes.mkdir()
+            Image.new("RGB", (32, 24), "black").save(trashes / "deleted.jpg")
+
+            self.assertEqual(run_with_mocks(build_config(source, output)), 0)
+            run_dir = latest_run(output)
+            manifest = read_manifest(run_dir)
+
+            self.assertEqual(manifest["counts"]["discovered"], 2)
+            self.assertEqual(manifest["counts"]["evaluated"], 2)
+            self.assertEqual(read_rows(run_dir / "failures.csv"), [])
+
+
 class CacheHitPipelineTests(unittest.TestCase):
     """The resumable path: a second run must reuse rows and run no inference."""
 

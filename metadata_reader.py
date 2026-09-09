@@ -216,13 +216,24 @@ def read_metadata_with_exiftool(
         "-@",
         "-",
     ]
-    result = subprocess.run(
-        command,
-        input="".join(f"{path}\n" for path in paths),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            input="".join(f"{path}\n" for path in paths),
+            capture_output=True,
+            text=True,
+            # ExifTool is told to emit UTF-8 filenames, so decode as UTF-8 rather
+            # than the console locale. A Windows code page would otherwise mangle
+            # a non-ASCII SourceFile and lose metadata for the whole batch.
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=_exiftool_timeout(len(paths)),
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"ExifTool did not finish within {error.timeout:.0f} seconds for {len(paths)} files"
+        ) from error
     if result.returncode != 0:
         message = result.stderr.strip() or "unknown ExifTool error"
         raise RuntimeError(f"ExifTool metadata extraction failed: {message}")
@@ -237,6 +248,15 @@ def read_metadata_with_exiftool(
             assumed_timezone,
         )
     return metadata_by_path
+
+
+def _exiftool_timeout(file_count: int) -> float:
+    """Scale the ExifTool deadline with the collection size.
+
+    A stalled network or removable mount must not hang the run behind an
+    indefinite spinner, but a large collection legitimately takes minutes.
+    """
+    return 60.0 + 0.05 * file_count
 
 
 def metadata_from_exiftool_values(

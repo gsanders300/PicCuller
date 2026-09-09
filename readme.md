@@ -345,6 +345,16 @@ Photo Cull excludes these items:
 - the configured output root
 - generated directories with names such as `run_YYYYMMDD_HHMMSS`
 - legacy directories with names such as `picks_YYYYMMDD_HHMMSS`
+- AppleDouble companions with names that start with `._`
+- operating-system directories such as `.Trashes`, `.Spotlight-V100`, `.fseventsd`,
+  `@eaDir`, `$RECYCLE.BIN`, `System Volume Information`, and `lost+found`
+
+AppleDouble companions appear whenever macOS writes to exFAT or FAT media. They carry an
+image extension but no image data. The operating-system directories hold deleted or
+derived copies, which must not be culled as if they were originals.
+
+Photo Cull does not silently skip a directory it cannot read. Each unreadable directory
+produces a warning and a `discovery` row in `failures.csv`.
 
 ### Primary-image rules
 
@@ -667,9 +677,19 @@ The file records:
 - Python, platform, and package versions
 - discovered, cached, evaluated, failed, winner, selected, and exported counts
 - phase times in seconds
+- per-stage times in seconds, with the image count for each stage
 - paths to generated outputs
 
 The final status is `completed`, `failed`, or `interrupted`.
+
+`timings_seconds` measures wall clock for each phase. Phases overlap, because decoding
+runs in worker threads while inference uses the previous batch, so these values do not
+divide the total.
+
+`stage_seconds` and `stage_counts` measure aggregate worker time for each stage: `decode`,
+`cpu_metrics`, `phash`, `musiq`, `clip`, and `portrait`. Divide one by the other for a
+per-image cost. Use these values, not the phase times, to compare throughput between runs.
+A fully cached run records no stages, because it evaluates nothing.
 
 ### `evaluation.csv`
 
@@ -732,7 +752,12 @@ has a successful evaluation.
 The `stage` column names the step that failed. A `cache_write` row means the evaluation
 finished but Photo Cull could not store it. That image still ranks and still exports; only
 the resumable cache record is lost. A `checkpoint` row means the file changed while Photo
-Cull read it, which is the one condition that discards a completed evaluation.
+Cull read it, which is the one condition that discards a completed evaluation. A
+`discovery` row means a directory could not be read, so its contents were not examined.
+
+Photo Cull appends each row and flushes it immediately, rather than rewriting the whole
+file. A run against an unsupported RAW format fails every image, so the row count is
+unbounded and a full rewrite for each failure would dominate the run.
 
 ### `feedback.csv`
 
