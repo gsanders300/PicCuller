@@ -265,7 +265,7 @@ a camera test must also pass.
 | --- | --- | --- |
 | `--device auto|cpu|cuda|mps` | `auto` | Select the compute device. |
 | `--batch-size INTEGER` | `8` | Set the CLIP batch size. Use a positive integer. |
-| `--workers INTEGER` | The smaller value of 4 and the CPU count | Set the number of image-decode workers. Use a positive integer. |
+| `--workers INTEGER` | The smaller value of 4 and the CPU count | Set the number of image-decode workers. Use a positive integer. A value above `--batch-size` has no effect, because decoding is prefetched one batch at a time. |
 | `--no-mixed-precision` | Off | Disable CUDA automatic mixed precision. This option does not change CPU or MPS operation. |
 
 ### Metadata options
@@ -996,7 +996,9 @@ Use these controls in this order:
 2. Use `--primary raw` or `--primary jpeg` to avoid duplicate family evaluation.
 3. Use `--device auto`.
 4. Increase `--batch-size` only when the device has sufficient memory.
-5. Adjust `--workers` for the storage device and CPU.
+5. Adjust `--workers` for the storage device and CPU. Raise `--batch-size` with it: decode
+   concurrency is the smaller of the two values, so `--workers` alone stops helping once it
+   passes `--batch-size`.
 6. Use an SSD for the source and output directories.
 
 Photo Cull decodes images in a bounded thread pool. It prepares one batch while the
