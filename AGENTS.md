@@ -93,6 +93,8 @@ Keep these behaviors when you change the pipeline:
 - Discovery order and score tie resolution are deterministic.
 - EXIF orientation is applied before every image metric.
 - A normal evaluation decodes each primary image only once.
+- The review page adds one reduced decode per new thumbnail, cached in the shared
+  thumbnail store, so a repeat run over unchanged photographs decodes nothing.
 - Image failures are isolated and recorded in `failures.csv`.
 - One bad image does not stop the remaining image evaluations.
 - A run fails when no image has a successful evaluation.

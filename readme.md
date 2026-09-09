@@ -700,6 +700,7 @@ The file records:
 - Python, platform, and package versions
 - discovered, cached, evaluated, preset-refreshed, failed, winner, selected, and
   exported counts
+- contact-sheet counts: images, thumbnails decoded, reused, and pruned
 - phase times in seconds
 - per-stage times in seconds, with the image count for each stage
 - paths to generated outputs
@@ -711,7 +712,8 @@ runs in worker threads while inference uses the previous batch, so these values 
 divide the total.
 
 `stage_seconds` and `stage_counts` measure aggregate worker time for each stage: `decode`,
-`cpu_metrics`, `phash`, `musiq`, `clip`, `portrait`, and `preset_refresh`. Divide one by the other for a
+`cpu_metrics`, `phash`, `musiq`, `clip`, `portrait`, `preset_refresh`, and
+`thumbnail_decode`. Divide one by the other for a
 per-image cost. Use these values, not the phase times, to compare throughput between runs.
 A fully cached run records no stages, because it evaluates nothing.
 
@@ -793,6 +795,18 @@ See [Edit a feedback file](#edit-a-feedback-file).
 The HTML file is the local review interface. The thumbnail directory contains JPEG
 previews with a maximum dimension of 480 pixels. A thumbnail failure appears in
 `failures.csv`.
+
+Previews are generated once per source file and kept in a shared store at
+`OUTPUT_ROOT/thumbnails/`. A repeat operation over the same photographs reuses them, so a
+fully cached operation decodes nothing at all. Each run directory receives hard links to
+the shared files, so the run directory stays self-contained (moving or archiving it
+carries the pixels) while several runs share one copy on disk. If the file system refuses
+a link, Photo Cull copies instead.
+
+The shared store is keyed by the source path relative to the input directory, its size,
+and its modification time, so it survives the collection moving and a changed file gets a
+new preview. The store keeps its 20000 most recent entries and discards the rest, which
+`run.json` reports as `thumbnails_pruned`.
 
 ### `picks/`
 

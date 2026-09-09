@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import os
+import shutil
 from collections.abc import Callable, Iterable
 from html import escape
 from pathlib import Path
@@ -199,12 +201,32 @@ def write_feedback_template(
     atomic_write_csv(destination, fieldnames, rows)
 
 
+def link_or_copy(source: Path, destination: Path) -> None:
+    """Publish a shared thumbnail into a run directory without copying bytes.
+
+    A hard link keeps the run directory self-contained (the link is the file, so
+    moving or archiving the directory carries the pixels) while several runs over
+    the same collection share one copy on disk. Falls back to a copy when the
+    filesystem refuses links.
+    """
+    destination.unlink(missing_ok=True)
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
 def generate_contact_sheet(
     destination: Path,
     candidates: list[dict[str, Any]],
-    thumbnail_loader: Callable[[Path], Any],
+    thumbnail_provider: Callable[[Path], Path],
 ) -> tuple[int, list[tuple[Path, Exception]]]:
-    """Generate a self-contained local review page with downloadable feedback."""
+    """Generate a self-contained local review page with downloadable feedback.
+
+    `thumbnail_provider` returns a path to a ready thumbnail for a source image.
+    Keeping generation behind that callable lets the caller reuse thumbnails
+    across runs instead of decoding every source again.
+    """
     thumbnail_dir = destination.parent / "thumbnails"
     thumbnail_dir.mkdir(parents=True, exist_ok=True)
     cards: list[str] = []
@@ -214,8 +236,7 @@ def generate_contact_sheet(
         source = Path(candidate["file_path"])
         thumbnail_name = f"{index:04d}.jpg"
         try:
-            image = thumbnail_loader(source)
-            image.save(thumbnail_dir / thumbnail_name, "JPEG", quality=86, optimize=True)
+            link_or_copy(thumbnail_provider(source), thumbnail_dir / thumbnail_name)
         except Exception as error:
             failures.append((source, error))
             continue

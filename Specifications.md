@@ -216,7 +216,12 @@ against the burst-winner total after ranking, when that total is known. EOF is t
 ## 8. Portfolio review and feedback
 
 `review.html` contains local thumbnails, scores, keep/reject controls, and a browser-side
-feedback CSV download. A later `--feedback` CSV pins keeps and removes rejects.
+feedback CSV download. Thumbnails come from a shared content-addressed store at
+`OUTPUT_ROOT/thumbnails/`, keyed by collection-relative path, size, modification time, and
+review dimension, and published into each run directory as hard links (falling back to a
+copy). A repeat run over unchanged photographs therefore decodes nothing: previously the
+review page re-decoded up to `--contact-sheet` sources on every run, which on a fully
+cached run was the only decode remaining. The store is bounded to its most recent entries. A later `--feedback` CSV pins keeps and removes rejects.
 
 `--diversity` uses maximal marginal relevance over normalized CLIP embeddings to trade
 off composite quality against similarity to already selected images. Zero is pure

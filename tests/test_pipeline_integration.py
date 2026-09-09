@@ -307,6 +307,100 @@ class CacheHitPipelineTests(unittest.TestCase):
             self.assertEqual(counts["evaluated"], 1)
 
 
+class ThumbnailReuseTests(unittest.TestCase):
+    """A fully cached repeat run must perform no decode at all."""
+
+    def test_a_repeat_run_reuses_every_thumbnail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+            config = build_config(
+                source, output, cache_mode="use", selection="none", contact_sheet_count=2
+            )
+
+            self.assertEqual(run_with_mocks(config), 0)
+            first = read_manifest(latest_run(output))["counts"]
+            self.assertEqual(first["thumbnails_decoded"], 2)
+            self.assertEqual(first["thumbnails_reused"], 0)
+
+            self.assertEqual(run_with_mocks(config), 0)
+            second_dir = latest_run(output)
+            second = read_manifest(second_dir)["counts"]
+
+            self.assertEqual(second["evaluated"], 0)
+            self.assertEqual(second["thumbnails_decoded"], 0)
+            self.assertEqual(second["thumbnails_reused"], 2)
+            # No decode anywhere in the run.
+            self.assertEqual(read_manifest(second_dir)["stage_seconds"], {})
+
+    def test_the_review_page_still_has_its_own_thumbnails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+            config = build_config(
+                source, output, cache_mode="use", selection="none", contact_sheet_count=2
+            )
+
+            run_with_mocks(config)
+            run_with_mocks(config)
+            run_dir = latest_run(output)
+            page = (run_dir / "review.html").read_text(encoding="utf-8")
+
+            # review.html keeps referring to its own directory, so the run stays
+            # self-contained even though the bytes are shared.
+            self.assertIn('src="thumbnails/0001.jpg"', page)
+            for name in ("0001.jpg", "0002.jpg"):
+                self.assertTrue((run_dir / "thumbnails" / name).is_file())
+            self.assertTrue((output / "thumbnails").is_dir())
+
+    def test_an_edited_source_regenerates_its_thumbnail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+            config = build_config(
+                source, output, cache_mode="use", selection="none", contact_sheet_count=2
+            )
+
+            run_with_mocks(config)
+            Image.new("RGB", (96, 72), "purple").save(source / "day-one" / "same.jpg")
+            run_with_mocks(config)
+
+            counts = read_manifest(latest_run(output))["counts"]
+
+            self.assertEqual(counts["thumbnails_decoded"], 1)
+            self.assertEqual(counts["thumbnails_reused"], 1)
+
+    def test_a_thumbnail_failure_is_recorded_and_does_not_stop_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+            config = build_config(
+                source, output, cache_mode="use", selection="none", contact_sheet_count=2
+            )
+
+            def refuse(*_args, **_kwargs):
+                raise OSError("cannot decode")
+
+            runtime_patch, device_patch = mocked_runtime()
+            with runtime_patch, device_patch, patch.object(cull, "_cached_thumbnail", refuse):
+                exit_code = cull.run_pipeline(config)
+
+            run_dir = latest_run(output)
+            stages = {row["stage"] for row in read_rows(run_dir / "failures.csv")}
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("contact_sheet", stages)
+            self.assertEqual(read_manifest(run_dir)["counts"]["contact_sheet_images"], 0)
+
+
 class PresetSwitchTests(unittest.TestCase):
     """Comparing presets must reuse the evaluation, not repeat it."""
 
