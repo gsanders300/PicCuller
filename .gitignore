@@ -1,0 +1,18 @@
+# Python bytecode and tooling caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local Python environments
+.venv/
+.uv/
+
+# Generated Photo Cull data and downloaded model weights
+.photo-cull/
+sac_vit_l_14_linear.pth
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
