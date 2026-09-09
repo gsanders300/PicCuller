@@ -829,7 +829,7 @@ records.
 
 A cache lookup uses these values:
 
-- resolved source path
+- source path relative to the input directory
 - file size
 - modification time in nanoseconds
 - evaluation-algorithm version
@@ -843,6 +843,18 @@ A cache lookup uses these values:
 A change to one of these values causes a new evaluation. Burst settings, selection
 count, diversity, feedback, contact-sheet count, and export settings do not invalidate
 the image metrics.
+
+The path is stored relative to the input directory, not as an absolute path, so moving a
+collection does not discard its evaluations. Copy a card to a different volume, remount it
+under another name, or move it to a different drive letter, and the cache still applies,
+because the default cache location travels inside the collection at
+`SOURCE/.photo-cull/`. Paths are stored with forward slashes, so a cache written on macOS
+is readable on Windows. The absolute path is also stored, for diagnostics only.
+
+If you point `--output-dir` at one directory shared by several collections, two
+collections could hold the same relative path. The file size and nanosecond modification
+time still have to match, so this is very unlikely to produce a wrong reuse, but keeping
+the default per-collection cache avoids the question entirely.
 
 The scoring preset is deliberately absent from that list. Only five stored values depend
 on the preset: the subject-integrity score, and the four portrait face and eye values.

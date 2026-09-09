@@ -25,7 +25,5 @@ over unchanged and are uncalibrated against the larger per-channel fractions.
 - A local service UI if the static contact sheet becomes limiting.
 - Signed model manifests or vendored model artifacts for offline deployments. SHA-256
   verification is mandatory today; nothing is cryptographically signed or vendored.
-- A portable cache key: the primary key is an absolute resolved path, so remounting a
-  collection at another drive letter or volume name discards every row.
 - Share review thumbnails across runs; the review page currently re-decodes every
   thumbnail, so even a fully cached run decodes.

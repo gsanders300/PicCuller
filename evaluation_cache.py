@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
-CACHE_SCHEMA_VERSION = 4
-SUPPORTED_SCHEMA_VERSIONS = (0, 1, 2, 3, CACHE_SCHEMA_VERSION)
+CACHE_SCHEMA_VERSION = 5
+SUPPORTED_SCHEMA_VERSIONS = (0, 1, 2, 3, 4, CACHE_SCHEMA_VERSION)
 
 BASE_FIELDS = (
     "timestamp_iso",
@@ -35,7 +35,7 @@ PRESET_FIELDS = (
     "eye_factor",
     "eye_warning",
 )
-# Text columns absent from schema 1 and 2, added before the split-table rebuild.
+# Text columns absent from schema 1 and 2, added before the rebuild.
 LEGACY_TEXT_ADDITIONS = (
     "timestamp_source",
     "timezone_source",
@@ -112,11 +112,28 @@ def strip_preset(signature: str) -> tuple[str, str]:
     return ";".join(kept), preset
 
 
+def relative_key(file_path: Path, source_root: Path) -> str:
+    """Return the collection-relative cache key for a source file.
+
+    Keys are relative and POSIX-separated so the cache survives the collection
+    moving: a different mount point, drive letter, or volume name no longer
+    discards every stored evaluation, and a cache written on one platform reads
+    on the other.
+    """
+    try:
+        return file_path.resolve().relative_to(source_root).as_posix()
+    except ValueError as error:
+        raise ValueError(
+            f"{file_path} is outside the collection root {source_root}"
+        ) from error
+
+
 class EvaluationCache:
     """SQLite-backed cache committed after each successfully evaluated image."""
 
-    def __init__(self, database_path: Path):
+    def __init__(self, database_path: Path, source_root: Path):
         self.database_path = database_path
+        self.source_root = source_root.resolve()
         self.connection: sqlite3.Connection | None = None
 
     def __enter__(self) -> Self:
@@ -133,9 +150,8 @@ class EvaluationCache:
                 )
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=NORMAL")
+            self._rebuild_legacy(connection)
             self._create_tables(connection)
-            if current_version < CACHE_SCHEMA_VERSION:
-                self._migrate_to_v4(connection)
             connection.execute(f"PRAGMA user_version={CACHE_SCHEMA_VERSION}")
             connection.commit()
         except BaseException:
@@ -155,8 +171,9 @@ class EvaluationCache:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS evaluations (
-                file_path TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
                 pipeline_signature TEXT NOT NULL,
+                absolute_path TEXT NOT NULL DEFAULT '',
                 size_bytes INTEGER NOT NULL,
                 modified_ns INTEGER NOT NULL,
                 timestamp_iso TEXT NOT NULL,
@@ -175,14 +192,14 @@ class EvaluationCache:
                 aesthetic_score REAL NOT NULL,
                 embedding_bytes BLOB NOT NULL,
                 embedding_length INTEGER NOT NULL,
-                PRIMARY KEY (file_path, pipeline_signature)
+                PRIMARY KEY (relative_path, pipeline_signature)
             )
             """
         )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS preset_evaluations (
-                file_path TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
                 pipeline_signature TEXT NOT NULL,
                 preset TEXT NOT NULL,
                 subject_integrity REAL NOT NULL DEFAULT 1.0,
@@ -190,23 +207,35 @@ class EvaluationCache:
                 eye_count INTEGER NOT NULL DEFAULT 0,
                 eye_factor REAL NOT NULL DEFAULT 1.0,
                 eye_warning TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (file_path, pipeline_signature, preset)
+                PRIMARY KEY (relative_path, pipeline_signature, preset)
             )
             """
         )
 
-    @staticmethod
-    def _migrate_to_v4(connection: sqlite3.Connection) -> None:
-        """Bring a schema 0 to 3 database up to the split-table layout.
+    def _rebuild_legacy(self, connection: sqlite3.Connection) -> None:
+        """Rebuild any schema 0 to 4 database into the current layout.
 
-        Schema 1 and 2 are missing base columns, and schema 2 and 3 fold the
-        preset into one signature so every preset stored a duplicate copy of
-        every preset-independent metric. Idempotent: a second pass finds a table
-        that already has every base column and no preset column, and returns.
+        One rebuild covers every older shape rather than a chain of steps:
+        schema 1 and 2 are missing base columns, schema 2 and 3 fold the preset
+        into the signature, and schema 4 keys rows by absolute path. Rows whose
+        stored path falls outside this collection are dropped, because they
+        cannot be expressed as a collection-relative key.
+
+        Idempotent: a current database has no `file_path` column, so this returns
+        immediately.
         """
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "evaluations" not in tables:
+            return
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(evaluations)").fetchall()
         }
+        if "file_path" not in columns:
+            return
+
         for name in LEGACY_TEXT_ADDITIONS:
             if name not in columns:
                 connection.execute(
@@ -214,37 +243,92 @@ class EvaluationCache:
                 )
                 columns.add(name)
 
-        legacy = [name for name in PRESET_FIELDS if name in columns]
-        rows = connection.execute(
+        legacy_preset = [name for name in PRESET_FIELDS if name in columns]
+        base_rows = connection.execute(
             "SELECT file_path, pipeline_signature, size_bytes, modified_ns, "
-            f"{', '.join(BASE_FIELDS)}{''.join(f', {name}' for name in legacy)} FROM evaluations"
+            f"{', '.join(BASE_FIELDS)}"
+            f"{''.join(f', {name}' for name in legacy_preset)} FROM evaluations"
         ).fetchall()
-        if not legacy and not any(strip_preset(row[1])[1] for row in rows):
-            return
-
-        connection.execute("ALTER TABLE evaluations RENAME TO evaluations_legacy")
-        EvaluationCache._create_tables(connection)
-
-        base_placeholders = ", ".join("?" * (4 + len(BASE_FIELDS)))
-        for row in rows:
-            file_path, signature, size_bytes, modified_ns = row[:4]
-            base_values = row[4 : 4 + len(BASE_FIELDS)]
-            legacy_values = row[4 + len(BASE_FIELDS) :]
-            base_signature, preset = strip_preset(signature)
+        preset_rows = (
             connection.execute(
-                "INSERT OR REPLACE INTO evaluations "
-                "(file_path, pipeline_signature, size_bytes, modified_ns, "
-                f"{', '.join(BASE_FIELDS)}) VALUES ({base_placeholders})",
-                (file_path, base_signature, size_bytes, modified_ns, *base_values),
+                "SELECT file_path, pipeline_signature, preset, "
+                f"{', '.join(PRESET_FIELDS)} FROM preset_evaluations"
+            ).fetchall()
+            if "preset_evaluations" in tables
+            else []
+        )
+
+        connection.execute("DROP TABLE evaluations")
+        if "preset_evaluations" in tables:
+            connection.execute("DROP TABLE preset_evaluations")
+        self._create_tables(connection)
+
+        for row in base_rows:
+            absolute, signature, size_bytes, modified_ns = row[:4]
+            key = self._relative_or_none(absolute)
+            if key is None:
+                continue
+            base_signature, preset = strip_preset(signature)
+            self._insert_base(
+                connection,
+                key,
+                base_signature,
+                absolute,
+                size_bytes,
+                modified_ns,
+                row[4 : 4 + len(BASE_FIELDS)],
             )
-            if preset and legacy:
-                connection.execute(
-                    "INSERT OR REPLACE INTO preset_evaluations "
-                    f"(file_path, pipeline_signature, preset, {', '.join(legacy)}) "
-                    f"VALUES ({', '.join('?' * (3 + len(legacy)))})",
-                    (file_path, base_signature, preset, *legacy_values),
+            if preset and legacy_preset:
+                self._insert_preset(
+                    connection,
+                    key,
+                    base_signature,
+                    preset,
+                    row[4 + len(BASE_FIELDS) :],
                 )
-        connection.execute("DROP TABLE evaluations_legacy")
+
+        for absolute, signature, preset, *values in preset_rows:
+            key = self._relative_or_none(absolute)
+            if key is not None:
+                self._insert_preset(connection, key, signature, preset, values)
+
+    def _relative_or_none(self, absolute: str) -> str | None:
+        try:
+            return Path(absolute).relative_to(self.source_root).as_posix()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _insert_base(
+        connection: sqlite3.Connection,
+        key: str,
+        signature: str,
+        absolute: str,
+        size_bytes: int,
+        modified_ns: int,
+        values: tuple,
+    ) -> None:
+        connection.execute(
+            "INSERT OR REPLACE INTO evaluations (relative_path, pipeline_signature, "
+            f"absolute_path, size_bytes, modified_ns, {', '.join(BASE_FIELDS)}) "
+            f"VALUES ({', '.join('?' * (5 + len(BASE_FIELDS)))})",
+            (key, signature, absolute, size_bytes, modified_ns, *values),
+        )
+
+    @staticmethod
+    def _insert_preset(
+        connection: sqlite3.Connection,
+        key: str,
+        signature: str,
+        preset: str,
+        values: tuple,
+    ) -> None:
+        connection.execute(
+            "INSERT OR REPLACE INTO preset_evaluations (relative_path, pipeline_signature, "
+            f"preset, {', '.join(PRESET_FIELDS)}) "
+            f"VALUES ({', '.join('?' * (3 + len(PRESET_FIELDS)))})",
+            (key, signature, preset, *values),
+        )
 
     def get(
         self,
@@ -257,13 +341,13 @@ class EvaluationCache:
             f"""
             SELECT {", ".join(BASE_FIELDS)}
             FROM evaluations
-            WHERE file_path = ?
+            WHERE relative_path = ?
               AND pipeline_signature = ?
               AND size_bytes = ?
               AND modified_ns = ?
             """,
             (
-                str(file_path.resolve()),
+                relative_key(file_path, self.source_root),
                 pipeline_signature,
                 fingerprint.size_bytes,
                 fingerprint.modified_ns,
@@ -282,9 +366,9 @@ class EvaluationCache:
             f"""
             SELECT {", ".join(PRESET_FIELDS)}
             FROM preset_evaluations
-            WHERE file_path = ? AND pipeline_signature = ? AND preset = ?
+            WHERE relative_path = ? AND pipeline_signature = ? AND preset = ?
             """,
-            (str(file_path.resolve()), pipeline_signature, preset),
+            (relative_key(file_path, self.source_root), pipeline_signature, preset),
         ).fetchone()
         return CachedPresetEvaluation(*row) if row is not None else None
 
@@ -301,17 +385,19 @@ class EvaluationCache:
             connection.execute(
                 f"""
                 INSERT INTO evaluations (
-                    file_path, pipeline_signature, size_bytes, modified_ns,
+                    relative_path, pipeline_signature, absolute_path, size_bytes, modified_ns,
                     {", ".join(BASE_FIELDS)}
-                ) VALUES ({", ".join("?" * (4 + len(BASE_FIELDS)))})
-                ON CONFLICT(file_path, pipeline_signature) DO UPDATE SET
+                ) VALUES ({", ".join("?" * (5 + len(BASE_FIELDS)))})
+                ON CONFLICT(relative_path, pipeline_signature) DO UPDATE SET
+                    absolute_path = excluded.absolute_path,
                     size_bytes = excluded.size_bytes,
                     modified_ns = excluded.modified_ns,
                     {assignments}
                 """,
                 (
-                    str(file_path.resolve()),
+                    relative_key(file_path, self.source_root),
                     pipeline_signature,
+                    str(file_path.resolve()),
                     fingerprint.size_bytes,
                     fingerprint.modified_ns,
                     *(getattr(evaluation, name) for name in BASE_FIELDS),
@@ -331,13 +417,13 @@ class EvaluationCache:
             connection.execute(
                 f"""
                 INSERT INTO preset_evaluations (
-                    file_path, pipeline_signature, preset, {", ".join(PRESET_FIELDS)}
+                    relative_path, pipeline_signature, preset, {", ".join(PRESET_FIELDS)}
                 ) VALUES ({", ".join("?" * (3 + len(PRESET_FIELDS)))})
-                ON CONFLICT(file_path, pipeline_signature, preset) DO UPDATE SET
+                ON CONFLICT(relative_path, pipeline_signature, preset) DO UPDATE SET
                     {assignments}
                 """,
                 (
-                    str(file_path.resolve()),
+                    relative_key(file_path, self.source_root),
                     pipeline_signature,
                     preset,
                     *(getattr(evaluation, name) for name in PRESET_FIELDS),

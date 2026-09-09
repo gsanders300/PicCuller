@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from evaluation_cache import (
+    BASE_FIELDS,
     CachedEvaluation,
     CachedPresetEvaluation,
     EvaluationCache,
@@ -58,10 +59,10 @@ class EvaluationCacheTests(unittest.TestCase):
             database = root / "cache.sqlite3"
             fingerprint = FileFingerprint.from_path(source)
 
-            with EvaluationCache(database) as cache:
+            with EvaluationCache(database, root) as cache:
                 cache.put(source, fingerprint, "pipeline-v1", sample_evaluation())
 
-            with EvaluationCache(database) as cache:
+            with EvaluationCache(database, root) as cache:
                 cached = cache.get(source, fingerprint, "pipeline-v1")
 
             self.assertEqual(cached, sample_evaluation())
@@ -74,7 +75,7 @@ class EvaluationCacheTests(unittest.TestCase):
             database = root / "cache.sqlite3"
             original_fingerprint = FileFingerprint.from_path(source)
 
-            with EvaluationCache(database) as cache:
+            with EvaluationCache(database, root) as cache:
                 cache.put(source, original_fingerprint, "pipeline-v1", sample_evaluation())
                 source.write_bytes(b"a different size")
                 changed_fingerprint = FileFingerprint.from_path(source)
@@ -89,7 +90,7 @@ class EvaluationCacheTests(unittest.TestCase):
             source.touch()
             fingerprint = FileFingerprint.from_path(source)
 
-            with EvaluationCache(root / "cache.sqlite3") as cache:
+            with EvaluationCache(root / "cache.sqlite3", root) as cache:
                 cache.put(source, fingerprint, "pipeline-v1", sample_evaluation())
                 cached = cache.get(source, fingerprint, "pipeline-v2")
 
@@ -97,7 +98,8 @@ class EvaluationCacheTests(unittest.TestCase):
 
     def test_version_one_schema_is_migrated_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            database = Path(temporary_directory).resolve() / "cache.sqlite3"
+            root = Path(temporary_directory).resolve()
+            database = root / "cache.sqlite3"
             connection = sqlite3.connect(database)
             connection.execute(
                 """
@@ -124,7 +126,7 @@ class EvaluationCacheTests(unittest.TestCase):
             connection.commit()
             connection.close()
 
-            with EvaluationCache(database) as cache:
+            with EvaluationCache(database, root) as cache:
                 columns = {
                     row[1]
                     for row in cache.connection.execute("PRAGMA table_info(evaluations)").fetchall()
@@ -153,7 +155,7 @@ class PresetSplitTests(unittest.TestCase):
             photo.write_bytes(b"photo")
             fingerprint = FileFingerprint.from_path(photo)
 
-            with EvaluationCache(root / "cache.sqlite3") as cache:
+            with EvaluationCache(root / "cache.sqlite3", root) as cache:
                 cache.put(photo, fingerprint, "sig", sample_evaluation())
                 for preset in ("balanced", "wildlife", "landscape"):
                     cache.put_preset(photo, "sig", preset, sample_preset_evaluation())
@@ -174,7 +176,7 @@ class PresetSplitTests(unittest.TestCase):
             photo.write_bytes(b"photo")
             fingerprint = FileFingerprint.from_path(photo)
 
-            with EvaluationCache(root / "cache.sqlite3") as cache:
+            with EvaluationCache(root / "cache.sqlite3", root) as cache:
                 cache.put(photo, fingerprint, "sig", sample_evaluation())
                 cache.put_preset(photo, "sig", "wildlife", sample_preset_evaluation())
 
@@ -189,7 +191,7 @@ class PresetSplitTests(unittest.TestCase):
             photo.write_bytes(b"photo")
             fingerprint = FileFingerprint.from_path(photo)
 
-            with EvaluationCache(root / "cache.sqlite3") as cache:
+            with EvaluationCache(root / "cache.sqlite3", root) as cache:
                 cache.put(photo, fingerprint, "sig", sample_evaluation())
                 cache.put_preset(photo, "sig", "wildlife", sample_preset_evaluation())
                 cache.put_preset(
@@ -221,7 +223,7 @@ class SignatureStrippingTests(unittest.TestCase):
 class SchemaThreeMigrationTests(unittest.TestCase):
     """Schema 3 folded the preset into the signature; the split must preserve it."""
 
-    def _legacy_database(self, path: Path, presets: tuple[str, ...]) -> None:
+    def _legacy_database(self, path: Path, presets: tuple[str, ...], root: Path) -> None:
         connection = sqlite3.connect(path)
         connection.execute(
             """
@@ -247,7 +249,8 @@ class SchemaThreeMigrationTests(unittest.TestCase):
                 "INSERT INTO evaluations VALUES "
                 "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    "/photos/a.jpg", f"algorithm=4;max_dim=1024;preset={preset}", 10, 20,
+                    str(root / "day-one" / "a.jpg"),
+                    f"algorithm=4;max_dim=1024;preset={preset}", 10, 20,
                     "2026-01-01T00:00:00+00:00", "exiftool:DateTimeOriginal", "embedded_offset",
                     "Camera", "SN", "1", "Center", "0123456789abcdef",
                     100.0, 70.0, 1.0, 2.0, 0.9, 6.5,
@@ -261,10 +264,11 @@ class SchemaThreeMigrationTests(unittest.TestCase):
 
     def test_duplicate_base_rows_collapse_and_preset_rows_survive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            database = Path(temporary_directory).resolve() / "cache.sqlite3"
-            self._legacy_database(database, ("balanced", "wildlife", "landscape"))
+            root = Path(temporary_directory).resolve()
+            database = root / "cache.sqlite3"
+            self._legacy_database(database, ("balanced", "wildlife", "landscape"), root)
 
-            with EvaluationCache(database) as cache:
+            with EvaluationCache(database, root) as cache:
                 base_rows = cache.connection.execute(
                     "SELECT COUNT(*) FROM evaluations"
                 ).fetchone()[0]
@@ -290,12 +294,13 @@ class SchemaThreeMigrationTests(unittest.TestCase):
 
     def test_migration_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            database = Path(temporary_directory).resolve() / "cache.sqlite3"
-            self._legacy_database(database, ("balanced", "wildlife"))
+            root = Path(temporary_directory).resolve()
+            database = root / "cache.sqlite3"
+            self._legacy_database(database, ("balanced", "wildlife"), root)
 
-            with EvaluationCache(database) as cache:
+            with EvaluationCache(database, root) as cache:
                 first = cache.connection.execute("SELECT COUNT(*) FROM preset_evaluations").fetchone()
-            with EvaluationCache(database) as cache:
+            with EvaluationCache(database, root) as cache:
                 second = cache.connection.execute(
                     "SELECT COUNT(*) FROM preset_evaluations"
                 ).fetchone()
@@ -308,18 +313,192 @@ class SchemaThreeMigrationTests(unittest.TestCase):
 
     def test_a_future_schema_is_refused_without_touching_the_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            database = Path(temporary_directory).resolve() / "cache.sqlite3"
+            root = Path(temporary_directory).resolve()
+            database = root / "cache.sqlite3"
             connection = sqlite3.connect(database)
             connection.execute("PRAGMA user_version=99")
             connection.commit()
             connection.close()
             before = database.read_bytes()
 
-            with self.assertRaises(RuntimeError) as raised, EvaluationCache(database):
+            with self.assertRaises(RuntimeError) as raised, EvaluationCache(database, root):
                 pass
 
             self.assertIn("Unsupported cache schema 99", str(raised.exception))
             self.assertEqual(database.read_bytes(), before)
+
+
+class PortableKeyTests(unittest.TestCase):
+    """The cache must survive the collection moving to a different path."""
+
+    def _populate(self, collection: Path) -> None:
+        (collection / "day-one").mkdir(parents=True)
+        photo = collection / "day-one" / "IMG_0001.ARW"
+        photo.write_bytes(b"raw bytes")
+        with EvaluationCache(collection / ".photo-cull" / "cache.sqlite3", collection) as cache:
+            cache.put(photo, FileFingerprint.from_path(photo), "sig", sample_evaluation())
+            cache.put_preset(photo, "sig", "wildlife", sample_preset_evaluation())
+
+    def test_moving_the_collection_keeps_every_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            original = root / "Volumes" / "CardA" / "shoot"
+            self._populate(original)
+
+            # The same collection, mounted somewhere else entirely.
+            moved = root / "Volumes" / "BackupDrive" / "archive" / "shoot"
+            moved.parent.mkdir(parents=True)
+            original.rename(moved)
+
+            photo = moved / "day-one" / "IMG_0001.ARW"
+            with EvaluationCache(moved / ".photo-cull" / "cache.sqlite3", moved) as cache:
+                cached = cache.get(photo, FileFingerprint.from_path(photo), "sig")
+                preset_cached = cache.get_preset(photo, "sig", "wildlife")
+
+            self.assertIsNotNone(cached, "a moved collection must not lose its evaluations")
+            self.assertEqual(cached, sample_evaluation())
+            self.assertEqual(preset_cached, sample_preset_evaluation())
+
+    def test_keys_are_posix_so_a_cache_crosses_platforms(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            self._populate(root / "shoot")
+            collection = root / "shoot"
+
+            with EvaluationCache(collection / ".photo-cull" / "cache.sqlite3", collection) as cache:
+                keys = [
+                    row[0]
+                    for row in cache.connection.execute(
+                        "SELECT relative_path FROM evaluations"
+                    ).fetchall()
+                ]
+
+            self.assertEqual(keys, ["day-one/IMG_0001.ARW"])
+            self.assertNotIn("\\", keys[0])
+
+    def test_the_absolute_path_is_kept_for_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            self._populate(root / "shoot")
+            collection = root / "shoot"
+
+            with EvaluationCache(collection / ".photo-cull" / "cache.sqlite3", collection) as cache:
+                stored = cache.connection.execute(
+                    "SELECT absolute_path FROM evaluations"
+                ).fetchone()[0]
+
+            self.assertEqual(stored, str(collection / "day-one" / "IMG_0001.ARW"))
+
+    def test_a_file_outside_the_collection_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            collection = root / "shoot"
+            collection.mkdir()
+            stray = root / "elsewhere.jpg"
+            stray.write_bytes(b"x")
+
+            with (
+                EvaluationCache(collection / "cache.sqlite3", collection) as cache,
+                self.assertRaises(ValueError) as raised,
+            ):
+                cache.get(stray, FileFingerprint.from_path(stray), "sig")
+
+            self.assertIn("outside the collection root", str(raised.exception))
+
+    def test_a_changed_file_still_misses_after_a_move(self) -> None:
+        """Portability must not weaken the size and mtime invalidation."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            collection = root / "shoot"
+            self._populate(collection)
+            photo = collection / "day-one" / "IMG_0001.ARW"
+            photo.write_bytes(b"different content entirely")
+
+            with EvaluationCache(collection / ".photo-cull" / "cache.sqlite3", collection) as cache:
+                cached = cache.get(photo, FileFingerprint.from_path(photo), "sig")
+
+            self.assertIsNone(cached)
+
+
+class AbsolutePathMigrationTests(unittest.TestCase):
+    def test_schema_four_rows_are_rekeyed_to_relative_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            collection = root / "shoot"
+            (collection / "day-one").mkdir(parents=True)
+            photo = collection / "day-one" / "IMG_0001.ARW"
+            photo.write_bytes(b"raw bytes")
+            database = collection / "cache.sqlite3"
+
+            connection = sqlite3.connect(database)
+            connection.execute(
+                """
+                CREATE TABLE evaluations (
+                    file_path TEXT NOT NULL, pipeline_signature TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL, modified_ns INTEGER NOT NULL,
+                    timestamp_iso TEXT NOT NULL, timestamp_source TEXT NOT NULL DEFAULT '',
+                    timezone_source TEXT NOT NULL DEFAULT '', camera_model TEXT NOT NULL DEFAULT '',
+                    camera_serial TEXT NOT NULL DEFAULT '',
+                    sequence_number TEXT NOT NULL DEFAULT '',
+                    autofocus_info TEXT NOT NULL DEFAULT '', phash_hex TEXT NOT NULL,
+                    focus_score REAL NOT NULL, musiq_score REAL NOT NULL, blown_pct REAL NOT NULL,
+                    crushed_pct REAL NOT NULL, exposure_penalty REAL NOT NULL,
+                    aesthetic_score REAL NOT NULL, embedding_bytes BLOB NOT NULL,
+                    embedding_length INTEGER NOT NULL,
+                    PRIMARY KEY (file_path, pipeline_signature)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE preset_evaluations (
+                    file_path TEXT NOT NULL, pipeline_signature TEXT NOT NULL,
+                    preset TEXT NOT NULL, subject_integrity REAL NOT NULL DEFAULT 1.0,
+                    face_count INTEGER NOT NULL DEFAULT 0, eye_count INTEGER NOT NULL DEFAULT 0,
+                    eye_factor REAL NOT NULL DEFAULT 1.0, eye_warning TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (file_path, pipeline_signature, preset)
+                )
+                """
+            )
+            fingerprint = FileFingerprint.from_path(photo)
+            evaluation = sample_evaluation()
+            connection.execute(
+                "INSERT INTO evaluations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    str(photo), "sig", fingerprint.size_bytes, fingerprint.modified_ns,
+                    *(getattr(evaluation, name) for name in BASE_FIELDS),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO preset_evaluations VALUES (?,?,?,?,?,?,?,?)",
+                (str(photo), "sig", "wildlife", 0.9, 1, 2, 1.0, ""),
+            )
+            # A row belonging to some other collection sharing this output root.
+            connection.execute(
+                "INSERT INTO evaluations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "/somewhere/else/other.jpg", "sig", 1, 2,
+                    *(getattr(evaluation, name) for name in BASE_FIELDS),
+                ),
+            )
+            connection.execute("PRAGMA user_version=4")
+            connection.commit()
+            connection.close()
+
+            with EvaluationCache(database, collection) as cache:
+                cached = cache.get(photo, fingerprint, "sig")
+                preset_cached = cache.get_preset(photo, "sig", "wildlife")
+                keys = [
+                    row[0]
+                    for row in cache.connection.execute(
+                        "SELECT relative_path FROM evaluations"
+                    ).fetchall()
+                ]
+
+            self.assertEqual(cached, evaluation)
+            self.assertEqual(preset_cached, sample_preset_evaluation())
+            # The unrelated row cannot be expressed relatively, so it is dropped.
+            self.assertEqual(keys, ["day-one/IMG_0001.ARW"])
 
 
 if __name__ == "__main__":

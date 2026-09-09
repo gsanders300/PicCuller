@@ -428,7 +428,7 @@ def _execute_pipeline(
     cache_context = (
         nullcontext(None)
         if config.cache_mode == "none"
-        else EvaluationCache(output_root / "evaluation_cache.sqlite3")
+        else EvaluationCache(output_root / "evaluation_cache.sqlite3", folder)
     )
 
     audit.set_phase("cache_lookup")

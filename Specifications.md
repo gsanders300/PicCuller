@@ -141,9 +141,18 @@ that behavior.
 ## 6. Cache, audit, and failure behavior
 
 Each successful evaluation is committed immediately to a WAL-mode SQLite database. The
-lookup identity contains resolved path, size, nanosecond modification time, model
-identities, algorithm version, image size, metadata backend, and assumed timezone. The
-cache stores no executable pickle data.
+lookup identity contains the collection-relative source path, size, nanosecond
+modification time, model identities, algorithm version, image size, metadata backend, and
+assumed timezone. The cache stores no executable pickle data.
+
+Schema 5 keys rows by the path relative to the input root, stored POSIX-separated, rather
+than by absolute path. An absolute key discarded every row whenever a collection was
+remounted at a different volume name or drive letter, which is review priority 2 (loss of
+resumable results); the relative key survives that, and survives moving between platforms.
+The absolute path is retained as a diagnostic column only. One `--output-dir` shared by
+several collections can in principle collide on an identical relative path; size and
+nanosecond modification time must also match, and the default per-collection cache
+location avoids the case.
 
 The preset is deliberately excluded from that identity. Schema 4 splits storage in two:
 `evaluations` holds the sixteen preset-independent metrics, and `preset_evaluations`

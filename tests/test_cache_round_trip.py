@@ -59,7 +59,7 @@ class CacheRoundTripTests(unittest.TestCase):
             original = source_record(photo, timestamp)
             fingerprint = FileFingerprint.from_path(photo)
 
-            with EvaluationCache(root / "cache.sqlite3") as cache:
+            with EvaluationCache(root / "cache.sqlite3", root) as cache:
                 cache.put(photo, fingerprint, "signature-1", cull.record_to_cache(original))
                 cache.put_preset(
                     photo, "signature-1", "wildlife", cull.record_to_preset_cache(original)
@@ -122,7 +122,7 @@ class CacheRoundTripTests(unittest.TestCase):
             original["aesthetic_score"] = 6.123456789012345
             fingerprint = FileFingerprint.from_path(photo)
 
-            with EvaluationCache(root / "cache.sqlite3") as cache:
+            with EvaluationCache(root / "cache.sqlite3", root) as cache:
                 cache.put(photo, fingerprint, "signature-1", cull.record_to_cache(original))
                 restored = cull.record_from_cache(
                     photo, cache.get(photo, fingerprint, "signature-1")
@@ -139,7 +139,7 @@ class CacheRoundTripTests(unittest.TestCase):
             original = source_record(photo, datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
             fingerprint = FileFingerprint.from_path(photo)
 
-            with EvaluationCache(root / "cache.sqlite3") as cache:
+            with EvaluationCache(root / "cache.sqlite3", root) as cache:
                 cache.put(photo, fingerprint, "signature-1", cull.record_to_cache(original))
                 cache.connection.execute(
                     "UPDATE evaluations SET embedding_length = embedding_length + 1"
@@ -159,7 +159,7 @@ class CacheRoundTripTests(unittest.TestCase):
             original = source_record(photo, datetime(2026, 3, 9, 11, 22, 33, tzinfo=UTC))
             fingerprint = FileFingerprint.from_path(photo)
 
-            with EvaluationCache(root / "cache.sqlite3") as cache:
+            with EvaluationCache(root / "cache.sqlite3", root) as cache:
                 first = cull.record_to_cache(original)
                 first_preset = cull.record_to_preset_cache(original)
                 cache.put(photo, fingerprint, "signature-1", first)
