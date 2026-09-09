@@ -10,6 +10,11 @@ ratings only in the export directory.
 This document uses ASD-STE100 principles where practical. Command names, file names,
 and model names keep their official spelling.
 
+For a narrative walkthrough that follows one photograph through every stage, from discovery
+to export, see [docs/how-a-photograph-is-judged.md](docs/how-a-photograph-is-judged.md).
+That document explains the reasoning behind each step in ordinary prose rather than
+specifying the rules.
+
 ## Contents
 
 - [Safety summary](#safety-summary)
