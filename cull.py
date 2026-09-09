@@ -28,7 +28,12 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from evaluation_cache import CachedEvaluation, EvaluationCache, FileFingerprint
+from evaluation_cache import (
+    CachedEvaluation,
+    CachedPresetEvaluation,
+    EvaluationCache,
+    FileFingerprint,
+)
 from file_ops import (
     build_export_plan,
     copy_export_plan,
@@ -233,13 +238,18 @@ def check_exposure_clipping(cv_image: Any) -> tuple[float, float, float]:
     return blown_fraction, crushed_fraction, highlight_penalty * shadow_penalty
 
 
-def record_from_cache(file_path: Path, cached: CachedEvaluation) -> dict[str, Any]:
+def record_from_cache(
+    file_path: Path,
+    cached: CachedEvaluation,
+    preset_cached: CachedPresetEvaluation | None = None,
+) -> dict[str, Any]:
     import imagehash
     import numpy as np
 
     embedding = np.frombuffer(cached.embedding_bytes, dtype="<f4")
     if embedding.size != cached.embedding_length:
         raise ValueError(f"Cached embedding has the wrong size for {file_path}")
+    preset_cached = preset_cached or CachedPresetEvaluation()
     return {
         "file_name": file_path.name,
         "file_path": str(file_path.resolve()),
@@ -258,13 +268,23 @@ def record_from_cache(file_path: Path, cached: CachedEvaluation) -> dict[str, An
         "exposure_penalty": cached.exposure_penalty,
         "aesthetic_score": cached.aesthetic_score,
         "embedding": embedding.copy(),
-        "subject_integrity": cached.subject_integrity,
-        "face_count": cached.face_count,
-        "eye_count": cached.eye_count,
-        "eye_factor": cached.eye_factor,
-        "eye_warning": cached.eye_warning,
+        "subject_integrity": preset_cached.subject_integrity,
+        "face_count": preset_cached.face_count,
+        "eye_count": preset_cached.eye_count,
+        "eye_factor": preset_cached.eye_factor,
+        "eye_warning": preset_cached.eye_warning,
         "cache_hit": True,
     }
+
+
+def record_to_preset_cache(record: dict[str, Any]) -> CachedPresetEvaluation:
+    return CachedPresetEvaluation(
+        subject_integrity=float(record["subject_integrity"]),
+        face_count=int(record["face_count"]),
+        eye_count=int(record["eye_count"]),
+        eye_factor=float(record["eye_factor"]),
+        eye_warning=str(record["eye_warning"]),
+    )
 
 
 def record_to_cache(record: dict[str, Any]) -> CachedEvaluation:
@@ -286,11 +306,6 @@ def record_to_cache(record: dict[str, Any]) -> CachedEvaluation:
         crushed_pct=float(record["crushed_pct"]),
         exposure_penalty=float(record["exposure_penalty"]),
         aesthetic_score=float(record["aesthetic_score"]),
-        subject_integrity=float(record["subject_integrity"]),
-        face_count=int(record["face_count"]),
-        eye_count=int(record["eye_count"]),
-        eye_factor=float(record["eye_factor"]),
-        eye_warning=str(record["eye_warning"]),
         embedding_bytes=embedding.tobytes(),
         embedding_length=int(embedding.size),
     )
@@ -407,6 +422,9 @@ def _execute_pipeline(
     cache_signature = _cache_signature(config, metadata_backend, audit.data["models"])
     records: list[dict[str, Any]] = []
     pending_files: list[tuple[Path, FileFingerprint]] = []
+    # Files whose preset-independent metrics are cached but whose preset-specific
+    # score is missing. These need no decode and no image-tower inference.
+    preset_pending: list[tuple[Path, CachedEvaluation]] = []
     cache_context = (
         nullcontext(None)
         if config.cache_mode == "none"
@@ -425,11 +443,36 @@ def _execute_pipeline(
                 )
                 if cached is None:
                     pending_files.append((file_path, fingerprint))
+                    continue
+                preset_cached = (
+                    None
+                    if evaluation_cache is None
+                    else evaluation_cache.get_preset(file_path, cache_signature, config.preset)
+                )
+                if preset_cached is not None:
+                    records.append(record_from_cache(file_path, cached, preset_cached))
+                elif profile.name == "portrait":
+                    # Face and eye detection needs decoded pixels, so portrait is
+                    # the one preset a cached embedding alone cannot satisfy.
+                    pending_files.append((file_path, fingerprint))
                 else:
-                    records.append(record_from_cache(file_path, cached))
+                    preset_pending.append((file_path, cached))
             except Exception as error:
                 audit.record_failure(file_path, "cache_lookup", error)
                 _warning(f"Could not inspect {file_path}: {error}")
+
+        if preset_pending:
+            audit.set_phase("preset_refresh")
+            records.extend(
+                _refresh_preset_scores(
+                    preset_pending,
+                    profile,
+                    config,
+                    evaluation_cache,
+                    cache_signature,
+                    audit,
+                )
+            )
 
         audit.set_count("cached", len(records))
         if records:
@@ -712,6 +755,65 @@ def _execute_pipeline(
     return 0
 
 
+def _refresh_preset_scores(
+    preset_pending: list[tuple[Path, CachedEvaluation]],
+    profile: ScoringProfile,
+    config: PipelineConfig,
+    evaluation_cache: EvaluationCache | None,
+    cache_signature: str,
+    audit: RunAudit,
+) -> list[dict[str, Any]]:
+    """Score a cached collection under a new preset without re-evaluating it.
+
+    Only the preset-specific fields are missing, and for every preset except
+    portrait they follow from the cached CLIP embedding. That makes a preset
+    comparison cost no decode and no image-tower inference.
+    """
+    from advanced_analysis import SUBJECT_PROMPTS
+
+    started = perf_counter()
+    restored = [
+        (file_path, record_from_cache(file_path, cached)) for file_path, cached in preset_pending
+    ]
+
+    if SUBJECT_PROMPTS.get(profile.name) is None:
+        # Balanced defines no prompts, so subject integrity is the constant 1.0
+        # and this path needs no model at all.
+        scores = [1.0] * len(restored)
+    else:
+        import numpy as np
+
+        from model_runtime import SubjectScorer, resolve_device
+
+        device = resolve_device(config.device)
+        with _status(f"Scoring the {profile.name} preset from cached embeddings", config):
+            scorer = SubjectScorer(device, profile.name)
+            embeddings = np.stack([record["embedding"] for _, record in restored])
+            scores = scorer.score(embeddings)
+
+    for (file_path, record), score in zip(restored, scores, strict=True):
+        record["subject_integrity"] = float(score)
+        if evaluation_cache is not None:
+            try:
+                evaluation_cache.put_preset(
+                    file_path,
+                    cache_signature,
+                    profile.name,
+                    record_to_preset_cache(record),
+                )
+            except Exception as error:
+                audit.record_failure(file_path, "cache_write", error)
+                _warning(f"Could not cache the {profile.name} score for {file_path}: {error}")
+
+    audit.accumulate_stage("preset_refresh", perf_counter() - started, len(restored))
+    audit.set_count("preset_refreshed", len(restored))
+    console.print(
+        f"[green]Scored {len(restored)} cached images for the "
+        f"{profile.name} preset without re-evaluating them.[/green]"
+    )
+    return [record for _, record in restored]
+
+
 def _evaluate_pending(
     pending_files: list[tuple[Path, FileFingerprint]],
     metadata_by_path: dict[Path, CaptureMetadata],
@@ -870,6 +972,12 @@ def _evaluate_pending(
                             item.fingerprint,
                             cache_signature,
                             record_to_cache(record),
+                        )
+                        evaluation_cache.put_preset(
+                            item.file_path,
+                            cache_signature,
+                            profile.name,
+                            record_to_preset_cache(record),
                         )
                     except Exception as error:
                         # A failed commit degrades to an uncached success. The
@@ -1060,7 +1168,6 @@ def _cache_signature(
             f"metadata={metadata_backend}",
             f"assumed_timezone={config.assumed_timezone or 'system'}",
             f"max_dim={MAX_IMAGE_DIMENSION}",
-            f"preset={config.preset}",
         )
     )
 

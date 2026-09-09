@@ -698,7 +698,8 @@ The file records:
 - all scoring-profile values
 - model names, revisions, and SHA-256 values
 - Python, platform, and package versions
-- discovered, cached, evaluated, failed, winner, selected, and exported counts
+- discovered, cached, evaluated, preset-refreshed, failed, winner, selected, and
+  exported counts
 - phase times in seconds
 - per-stage times in seconds, with the image count for each stage
 - paths to generated outputs
@@ -710,7 +711,7 @@ runs in worker threads while inference uses the previous batch, so these values 
 divide the total.
 
 `stage_seconds` and `stage_counts` measure aggregate worker time for each stage: `decode`,
-`cpu_metrics`, `phash`, `musiq`, `clip`, and `portrait`. Divide one by the other for a
+`cpu_metrics`, `phash`, `musiq`, `clip`, `portrait`, and `preset_refresh`. Divide one by the other for a
 per-image cost. Use these values, not the phase times, to compare throughput between runs.
 A fully cached run records no stages, because it evaluates nothing.
 
@@ -835,7 +836,6 @@ A cache lookup uses these values:
 - maximum preview size
 - metadata backend
 - assumed timezone
-- scoring preset
 - CLIP identity and revision
 - MUSIQ identity, revision, and SHA-256
 - aesthetic-head SHA-256
@@ -843,6 +843,28 @@ A cache lookup uses these values:
 A change to one of these values causes a new evaluation. Burst settings, selection
 count, diversity, feedback, contact-sheet count, and export settings do not invalidate
 the image metrics.
+
+The scoring preset is deliberately absent from that list. Only five stored values depend
+on the preset: the subject-integrity score, and the four portrait face and eye values.
+Photo Cull stores those separately, keyed by preset, so one evaluation serves every
+preset instead of each preset storing its own copy of every metric.
+
+### Compare presets without re-evaluating
+
+Change `--preset` on a collection Photo Cull has already evaluated and it reuses the
+stored metrics:
+
+- `balanced` defines no subject prompts, so its subject score is a constant. The run
+  loads no model at all.
+- `wildlife` and `landscape` need two text prompts compared with the stored image
+  embedding. Photo Cull loads the CLIP text tower once. It does not decode an image, it
+  does not load MUSIQ, and it does not run image inference.
+- `portrait` needs the decoded pixels for face and eye detection, so it evaluates the
+  images again.
+
+A refreshed preset score is stored, so returning to a preset you have already used is an
+ordinary cache hit. The run reports the work as the `preset_refresh` phase and the
+`preset_refreshed` count.
 
 The evaluation algorithm version is part of the identity, so a release that changes what
 a metric means invalidates every stored row. Version 5 does this: it changes JPEG draft

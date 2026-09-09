@@ -61,10 +61,15 @@ class CacheRoundTripTests(unittest.TestCase):
 
             with EvaluationCache(root / "cache.sqlite3") as cache:
                 cache.put(photo, fingerprint, "signature-1", cull.record_to_cache(original))
+                cache.put_preset(
+                    photo, "signature-1", "wildlife", cull.record_to_preset_cache(original)
+                )
                 cached = cache.get(photo, fingerprint, "signature-1")
+                preset_cached = cache.get_preset(photo, "signature-1", "wildlife")
 
             self.assertIsNotNone(cached)
-            restored = cull.record_from_cache(photo, cached)
+            self.assertIsNotNone(preset_cached)
+            restored = cull.record_from_cache(photo, cached, preset_cached)
 
             # The binary embedding must come back bit-identical.
             np.testing.assert_array_equal(restored["embedding"], original["embedding"])
@@ -156,13 +161,19 @@ class CacheRoundTripTests(unittest.TestCase):
 
             with EvaluationCache(root / "cache.sqlite3") as cache:
                 first = cull.record_to_cache(original)
+                first_preset = cull.record_to_preset_cache(original)
                 cache.put(photo, fingerprint, "signature-1", first)
+                cache.put_preset(photo, "signature-1", "portrait", first_preset)
                 restored = cull.record_from_cache(
-                    photo, cache.get(photo, fingerprint, "signature-1")
+                    photo,
+                    cache.get(photo, fingerprint, "signature-1"),
+                    cache.get_preset(photo, "signature-1", "portrait"),
                 )
                 second = cull.record_to_cache(restored)
+                second_preset = cull.record_to_preset_cache(restored)
 
             self.assertEqual(first, second)
+            self.assertEqual(first_preset, second_preset)
 
 
 if __name__ == "__main__":

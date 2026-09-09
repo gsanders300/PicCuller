@@ -140,10 +140,24 @@ that behavior.
 
 ## 6. Cache, audit, and failure behavior
 
-Each successful evaluation is committed immediately to a WAL-mode SQLite database.
-The lookup identity contains resolved path, size, nanosecond modification time, model
-identities, algorithm version, image size, metadata backend, assumed timezone, and
-preset. The cache stores no executable pickle data.
+Each successful evaluation is committed immediately to a WAL-mode SQLite database. The
+lookup identity contains resolved path, size, nanosecond modification time, model
+identities, algorithm version, image size, metadata backend, and assumed timezone. The
+cache stores no executable pickle data.
+
+The preset is deliberately excluded from that identity. Schema 4 splits storage in two:
+`evaluations` holds the sixteen preset-independent metrics, and `preset_evaluations`
+holds the five preset-dependent ones (subject integrity plus the four portrait face and
+eye values) keyed by preset. One evaluation therefore serves every preset, where schema 3
+stored a complete duplicate per preset.
+
+A base hit with a missing preset row enters the `preset_refresh` phase rather than a full
+evaluation. `balanced` needs no model, because it defines no prompts and its subject score
+is the constant 1.0. `wildlife` and `landscape` need only the CLIP text tower compared
+with the stored embedding: no decode, no MUSIQ, and no image-tower inference. `portrait`
+is the exception, because face and eye detection needs decoded pixels, so those files are
+evaluated again. Refreshed scores are stored, so returning to a preset already used is an
+ordinary cache hit.
 
 A failed cache write does not discard the evaluation. The record is kept for ranking,
 reporting, and export, and the fault is recorded as a `cache_write` failure. The only

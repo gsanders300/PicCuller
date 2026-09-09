@@ -5,7 +5,13 @@ from pathlib import Path
 
 import numpy as np
 
-from evaluation_cache import CachedEvaluation, EvaluationCache, FileFingerprint
+from evaluation_cache import (
+    CachedEvaluation,
+    CachedPresetEvaluation,
+    EvaluationCache,
+    FileFingerprint,
+    strip_preset,
+)
 
 # A real normalized little-endian float32 vector, so the round trip through
 # record_from_cache's np.frombuffer is actually exercised.
@@ -28,13 +34,18 @@ def sample_evaluation() -> CachedEvaluation:
         crushed_pct=3.4,
         exposure_penalty=0.95,
         aesthetic_score=6.8,
+        embedding_bytes=SAMPLE_EMBEDDING.tobytes(),
+        embedding_length=int(SAMPLE_EMBEDDING.size),
+    )
+
+
+def sample_preset_evaluation() -> CachedPresetEvaluation:
+    return CachedPresetEvaluation(
         subject_integrity=0.9,
         face_count=1,
         eye_count=2,
         eye_factor=1.0,
         eye_warning="",
-        embedding_bytes=SAMPLE_EMBEDDING.tobytes(),
-        embedding_length=int(SAMPLE_EMBEDDING.size),
     )
 
 
@@ -118,9 +129,197 @@ class EvaluationCacheTests(unittest.TestCase):
                     row[1]
                     for row in cache.connection.execute("PRAGMA table_info(evaluations)").fetchall()
                 }
+                preset_columns = {
+                    row[1]
+                    for row in cache.connection.execute(
+                        "PRAGMA table_info(preset_evaluations)"
+                    ).fetchall()
+                }
 
+            # Schema 1 lacked the provenance columns entirely.
             self.assertIn("timestamp_source", columns)
-            self.assertIn("subject_integrity", columns)
+            # Preset-specific metrics now live in their own table.
+            self.assertIn("subject_integrity", preset_columns)
+            self.assertNotIn("subject_integrity", columns)
+
+
+class PresetSplitTests(unittest.TestCase):
+    """Preset-independent metrics must be stored once, not once per preset."""
+
+    def test_one_base_row_serves_every_preset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            photo = root / "photo.jpg"
+            photo.write_bytes(b"photo")
+            fingerprint = FileFingerprint.from_path(photo)
+
+            with EvaluationCache(root / "cache.sqlite3") as cache:
+                cache.put(photo, fingerprint, "sig", sample_evaluation())
+                for preset in ("balanced", "wildlife", "landscape"):
+                    cache.put_preset(photo, "sig", preset, sample_preset_evaluation())
+                base_rows = cache.connection.execute(
+                    "SELECT COUNT(*) FROM evaluations"
+                ).fetchone()[0]
+                preset_rows = cache.connection.execute(
+                    "SELECT COUNT(*) FROM preset_evaluations"
+                ).fetchone()[0]
+
+            self.assertEqual(base_rows, 1)
+            self.assertEqual(preset_rows, 3)
+
+    def test_a_missing_preset_row_does_not_hide_the_base_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            photo = root / "photo.jpg"
+            photo.write_bytes(b"photo")
+            fingerprint = FileFingerprint.from_path(photo)
+
+            with EvaluationCache(root / "cache.sqlite3") as cache:
+                cache.put(photo, fingerprint, "sig", sample_evaluation())
+                cache.put_preset(photo, "sig", "wildlife", sample_preset_evaluation())
+
+                self.assertIsNotNone(cache.get(photo, fingerprint, "sig"))
+                self.assertIsNotNone(cache.get_preset(photo, "sig", "wildlife"))
+                self.assertIsNone(cache.get_preset(photo, "sig", "landscape"))
+
+    def test_preset_rows_are_updated_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            photo = root / "photo.jpg"
+            photo.write_bytes(b"photo")
+            fingerprint = FileFingerprint.from_path(photo)
+
+            with EvaluationCache(root / "cache.sqlite3") as cache:
+                cache.put(photo, fingerprint, "sig", sample_evaluation())
+                cache.put_preset(photo, "sig", "wildlife", sample_preset_evaluation())
+                cache.put_preset(
+                    photo, "sig", "wildlife", CachedPresetEvaluation(subject_integrity=0.25)
+                )
+                stored = cache.get_preset(photo, "sig", "wildlife")
+                count = cache.connection.execute(
+                    "SELECT COUNT(*) FROM preset_evaluations"
+                ).fetchone()[0]
+
+            self.assertEqual(count, 1)
+            self.assertEqual(stored.subject_integrity, 0.25)
+
+
+class SignatureStrippingTests(unittest.TestCase):
+    def test_the_preset_is_removed_and_returned(self) -> None:
+        base, preset = strip_preset("algorithm=5;max_dim=1024;preset=wildlife")
+
+        self.assertEqual(base, "algorithm=5;max_dim=1024")
+        self.assertEqual(preset, "wildlife")
+
+    def test_a_signature_without_a_preset_is_unchanged(self) -> None:
+        base, preset = strip_preset("algorithm=5;max_dim=1024")
+
+        self.assertEqual(base, "algorithm=5;max_dim=1024")
+        self.assertEqual(preset, "")
+
+
+class SchemaThreeMigrationTests(unittest.TestCase):
+    """Schema 3 folded the preset into the signature; the split must preserve it."""
+
+    def _legacy_database(self, path: Path, presets: tuple[str, ...]) -> None:
+        connection = sqlite3.connect(path)
+        connection.execute(
+            """
+            CREATE TABLE evaluations (
+                file_path TEXT NOT NULL, pipeline_signature TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL, modified_ns INTEGER NOT NULL,
+                timestamp_iso TEXT NOT NULL, timestamp_source TEXT NOT NULL DEFAULT '',
+                timezone_source TEXT NOT NULL DEFAULT '', camera_model TEXT NOT NULL DEFAULT '',
+                camera_serial TEXT NOT NULL DEFAULT '', sequence_number TEXT NOT NULL DEFAULT '',
+                autofocus_info TEXT NOT NULL DEFAULT '', phash_hex TEXT NOT NULL,
+                focus_score REAL NOT NULL, musiq_score REAL NOT NULL, blown_pct REAL NOT NULL,
+                crushed_pct REAL NOT NULL, exposure_penalty REAL NOT NULL,
+                aesthetic_score REAL NOT NULL, subject_integrity REAL NOT NULL DEFAULT 1.0,
+                face_count INTEGER NOT NULL DEFAULT 0, eye_count INTEGER NOT NULL DEFAULT 0,
+                eye_factor REAL NOT NULL DEFAULT 1.0, eye_warning TEXT NOT NULL DEFAULT '',
+                embedding_bytes BLOB NOT NULL, embedding_length INTEGER NOT NULL,
+                PRIMARY KEY (file_path, pipeline_signature)
+            )
+            """
+        )
+        for index, preset in enumerate(presets):
+            connection.execute(
+                "INSERT INTO evaluations VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "/photos/a.jpg", f"algorithm=4;max_dim=1024;preset={preset}", 10, 20,
+                    "2026-01-01T00:00:00+00:00", "exiftool:DateTimeOriginal", "embedded_offset",
+                    "Camera", "SN", "1", "Center", "0123456789abcdef",
+                    100.0, 70.0, 1.0, 2.0, 0.9, 6.5,
+                    0.5 + index * 0.1, index, index * 2, 1.0, "",
+                    SAMPLE_EMBEDDING.tobytes(), int(SAMPLE_EMBEDDING.size),
+                ),
+            )
+        connection.execute("PRAGMA user_version=3")
+        connection.commit()
+        connection.close()
+
+    def test_duplicate_base_rows_collapse_and_preset_rows_survive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory).resolve() / "cache.sqlite3"
+            self._legacy_database(database, ("balanced", "wildlife", "landscape"))
+
+            with EvaluationCache(database) as cache:
+                base_rows = cache.connection.execute(
+                    "SELECT COUNT(*) FROM evaluations"
+                ).fetchone()[0]
+                preset_rows = dict(
+                    cache.connection.execute(
+                        "SELECT preset, subject_integrity FROM preset_evaluations"
+                    ).fetchall()
+                )
+                signatures = {
+                    row[0]
+                    for row in cache.connection.execute(
+                        "SELECT DISTINCT pipeline_signature FROM evaluations"
+                    ).fetchall()
+                }
+
+            # Three preset copies of one photo collapse to a single base row.
+            self.assertEqual(base_rows, 1)
+            self.assertEqual(signatures, {"algorithm=4;max_dim=1024"})
+            # Each preset keeps its own subject integrity.
+            self.assertEqual(set(preset_rows), {"balanced", "wildlife", "landscape"})
+            for preset, expected in (("balanced", 0.5), ("wildlife", 0.6), ("landscape", 0.7)):
+                self.assertAlmostEqual(preset_rows[preset], expected)
+
+    def test_migration_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory).resolve() / "cache.sqlite3"
+            self._legacy_database(database, ("balanced", "wildlife"))
+
+            with EvaluationCache(database) as cache:
+                first = cache.connection.execute("SELECT COUNT(*) FROM preset_evaluations").fetchone()
+            with EvaluationCache(database) as cache:
+                second = cache.connection.execute(
+                    "SELECT COUNT(*) FROM preset_evaluations"
+                ).fetchone()
+                leftover = cache.connection.execute(
+                    "SELECT name FROM sqlite_master WHERE name = 'evaluations_legacy'"
+                ).fetchall()
+
+            self.assertEqual(first, second)
+            self.assertEqual(leftover, [])
+
+    def test_a_future_schema_is_refused_without_touching_the_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory).resolve() / "cache.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.execute("PRAGMA user_version=99")
+            connection.commit()
+            connection.close()
+            before = database.read_bytes()
+
+            with self.assertRaises(RuntimeError) as raised, EvaluationCache(database):
+                pass
+
+            self.assertIn("Unsupported cache schema 99", str(raised.exception))
+            self.assertEqual(database.read_bytes(), before)
 
 
 if __name__ == "__main__":

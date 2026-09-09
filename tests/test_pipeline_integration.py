@@ -307,6 +307,153 @@ class CacheHitPipelineTests(unittest.TestCase):
             self.assertEqual(counts["evaluated"], 1)
 
 
+class PresetSwitchTests(unittest.TestCase):
+    """Comparing presets must reuse the evaluation, not repeat it."""
+
+    def test_switching_to_balanced_needs_no_model_at_all(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+
+            wildlife = build_config(
+                source, output, cache_mode="use", selection="none", preset="wildlife"
+            )
+            self.assertEqual(run_with_mocks(wildlife), 0)
+            self.assertEqual(read_manifest(latest_run(output))["counts"]["evaluated"], 2)
+
+            # Balanced defines no subject prompts, so its score is a constant and
+            # the run must not construct a model runtime.
+            def explode(*_args, **_kwargs):
+                raise AssertionError("switching to balanced must not load a model")
+
+            balanced = build_config(
+                source, output, cache_mode="use", selection="none", preset="balanced"
+            )
+            with (
+                patch("model_runtime.ModelRuntime", explode),
+                patch("model_runtime.SubjectScorer", explode),
+            ):
+                self.assertEqual(cull.run_pipeline(balanced), 0)
+
+            counts = read_manifest(latest_run(output))["counts"]
+            self.assertEqual(counts["evaluated"], 0)
+            self.assertEqual(counts["cached"], 2)
+            self.assertEqual(counts["preset_refreshed"], 2)
+
+    def test_switching_to_a_prompted_preset_scores_from_cached_embeddings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+
+            balanced = build_config(
+                source, output, cache_mode="use", selection="none", preset="balanced"
+            )
+            run_with_mocks(balanced)
+
+            class FakeSubjectScorer:
+                def __init__(self, device, preset):
+                    self.preset = preset
+
+                def score(self, embeddings):
+                    return [0.75] * len(embeddings)
+
+            def explode(*_args, **_kwargs):
+                raise AssertionError("a preset switch must not run image inference")
+
+            landscape = build_config(
+                source, output, cache_mode="use", selection="none", preset="landscape"
+            )
+            with (
+                patch("model_runtime.SubjectScorer", FakeSubjectScorer),
+                patch("model_runtime.ModelRuntime", explode),
+                patch("cull._prepare_image", explode),
+                patch(
+                    "model_runtime.resolve_device",
+                    return_value=SimpleNamespace(type="cpu"),
+                ),
+            ):
+                self.assertEqual(cull.run_pipeline(landscape), 0)
+
+            run_dir = latest_run(output)
+            counts = read_manifest(run_dir)["counts"]
+            rows = read_rows(run_dir / "evaluation.csv")
+
+            self.assertEqual(counts["evaluated"], 0)
+            self.assertEqual(counts["preset_refreshed"], 2)
+            self.assertTrue(all(row["subject_integrity"] == "0.75" for row in rows))
+
+    def test_the_refreshed_preset_is_cached_for_the_next_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+
+            run_with_mocks(
+                build_config(source, output, cache_mode="use", selection="none", preset="wildlife")
+            )
+            balanced = build_config(
+                source, output, cache_mode="use", selection="none", preset="balanced"
+            )
+            cull.run_pipeline(balanced)
+            self.assertEqual(
+                read_manifest(latest_run(output))["counts"]["preset_refreshed"], 2
+            )
+
+            # The third run is a plain cache hit. preset_refreshed staying at zero
+            # is the proof that the refreshed scores were persisted.
+            def explode(*_args, **_kwargs):
+                raise AssertionError("a persisted preset score must not be recomputed")
+
+            with patch("model_runtime.SubjectScorer", explode):
+                cull.run_pipeline(balanced)
+            counts = read_manifest(latest_run(output))["counts"]
+
+            self.assertEqual(counts["cached"], 2)
+            self.assertEqual(counts.get("preset_refreshed", 0), 0)
+            self.assertEqual(counts["evaluated"], 0)
+
+    def test_portrait_still_needs_the_pixels(self) -> None:
+        """Face and eye detection cannot come from a cached embedding."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+
+            run_with_mocks(
+                build_config(source, output, cache_mode="use", selection="none", preset="balanced")
+            )
+            run_with_mocks(
+                build_config(source, output, cache_mode="use", selection="none", preset="portrait")
+            )
+
+            counts = read_manifest(latest_run(output))["counts"]
+
+            self.assertEqual(counts["evaluated"], 2)
+            self.assertEqual(counts["cached"], 0)
+
+    def test_the_preset_is_not_part_of_the_shared_signature(self) -> None:
+        config = build_config(Path("/photos"), Path("/out"), preset="wildlife")
+        other = build_config(Path("/photos"), Path("/out"), preset="landscape")
+        manifest = {
+            "clip": "clip@rev",
+            "musiq": "musiq@rev",
+            "musiq_sha256": "aa",
+            "aesthetic_sha256": "bb",
+        }
+
+        self.assertEqual(
+            cull._cache_signature(config, "pillow", manifest),
+            cull._cache_signature(other, "pillow", manifest),
+        )
+        self.assertNotIn("preset=", cull._cache_signature(config, "pillow", manifest))
+
+
 class CacheWriteFailureTests(unittest.TestCase):
     def test_a_failed_cache_write_keeps_the_completed_evaluation(self) -> None:
         """A SQLite fault must cost the cache row, not the computed record."""

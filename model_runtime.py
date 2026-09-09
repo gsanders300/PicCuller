@@ -188,6 +188,52 @@ class ModelRuntime:
             return features / features.norm(p=2, dim=-1, keepdim=True)
 
 
+class SubjectScorer:
+    """Recompute subject integrity from cached embeddings.
+
+    Only the CLIP text tower is needed, so this skips the MUSIQ checkpoint and
+    the aesthetic head entirely, and never decodes an image. It exists so that
+    changing `--preset` on an evaluated collection does not repeat inference.
+    """
+
+    def __init__(self, device: torch.device, preset: str) -> None:
+        self.device = device
+        prompts = SUBJECT_PROMPTS.get(preset)
+        if prompts is None:
+            raise ValueError(f"Preset {preset!r} defines no subject prompts")
+        model = (
+            CLIPModel.from_pretrained(CLIP_MODEL_ID, revision=CLIP_MODEL_REVISION)
+            .to(device)
+            .eval()
+        )
+        processor = CLIPProcessor.from_pretrained(
+            CLIP_MODEL_ID,
+            revision=CLIP_MODEL_REVISION,
+            use_fast=False,
+        )
+        inputs = processor(text=list(prompts), return_tensors="pt", padding=True).to(device)
+        with torch.inference_mode():
+            features = model.get_text_features(**inputs)
+            self.text_features = features / features.norm(p=2, dim=-1, keepdim=True)
+
+    def score(self, embeddings: np.ndarray) -> list[float]:
+        """Score already-normalized image embeddings, shape (count, dimension)."""
+        if embeddings.size == 0:
+            return []
+        tensor = torch.from_numpy(np.ascontiguousarray(embeddings, dtype=np.float32)).to(
+            self.device
+        )
+        with torch.inference_mode():
+            return [
+                0.5 + 0.5 * score
+                for score in subject_integrity_scores(
+                    tensor,
+                    self.text_features[0:1],
+                    self.text_features[1:2],
+                )
+            ]
+
+
 def resolve_device(preference: str = "auto") -> torch.device:
     if preference == "cuda":
         if not torch.cuda.is_available():
