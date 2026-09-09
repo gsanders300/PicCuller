@@ -1,9 +1,10 @@
-from datetime import datetime, timedelta
 import unittest
+from datetime import UTC, datetime, timedelta
 
 from scoring import (
     assign_session_focus_factors,
     calculate_composite_score,
+    get_scoring_profile,
     group_bursts,
 )
 
@@ -16,13 +17,14 @@ def record(
 ) -> dict:
     return {
         "file_path": name,
-        "timestamp": timestamp or datetime(2026, 9, 9, 12, 0, 0),
+        "timestamp": timestamp or datetime(2026, 9, 9, 12, 0, 0, tzinfo=UTC),
         "phash": phash,
         "embedding": (1.0, 0.0),
         "focus_score": focus,
         "musiq_score": 80.0,
         "exposure_penalty": 1.0,
         "aesthetic_score": 7.0,
+        "camera_serial": "camera-a",
     }
 
 
@@ -54,7 +56,7 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(records[1]["focus_percentile"], 0.75)
 
     def test_grouping_is_deterministic_when_timestamps_match(self) -> None:
-        timestamp = datetime(2026, 9, 9, 12, 0, 0)
+        timestamp = datetime(2026, 9, 9, 12, 0, 0, tzinfo=UTC)
         records = [record("b.jpg", 10.0, timestamp), record("a.jpg", 20.0, timestamp)]
         assign_session_focus_factors(records)
 
@@ -64,7 +66,7 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual({item["burst_id"] for item in grouped}, {1})
 
     def test_time_gap_starts_a_new_burst(self) -> None:
-        timestamp = datetime(2026, 9, 9, 12, 0, 0)
+        timestamp = datetime(2026, 9, 9, 12, 0, 0, tzinfo=UTC)
         records = [
             record("a.jpg", 10.0, timestamp),
             record("b.jpg", 20.0, timestamp + timedelta(seconds=3)),
@@ -74,6 +76,37 @@ class ScoringTests(unittest.TestCase):
         grouped = group_bursts(records, time_window_seconds=2.0)
 
         self.assertEqual([item["burst_id"] for item in grouped], [1, 2])
+
+    def test_burst_duration_is_bounded_despite_adjacent_matches(self) -> None:
+        timestamp = datetime(2026, 9, 9, 12, 0, 0, tzinfo=UTC)
+        records = [
+            record(f"{index}.jpg", 10.0, timestamp + timedelta(seconds=index * 2))
+            for index in range(7)
+        ]
+        assign_session_focus_factors(records)
+
+        grouped = group_bursts(records, max_burst_duration_seconds=10.0)
+
+        self.assertEqual([item["burst_id"] for item in grouped], [1, 1, 1, 1, 1, 1, 2])
+
+    def test_known_different_cameras_do_not_share_a_burst(self) -> None:
+        records = [record("a.jpg", 10.0), record("b.jpg", 10.0)]
+        records[1]["camera_serial"] = "camera-b"
+        assign_session_focus_factors(records)
+
+        grouped = group_bursts(records)
+
+        self.assertEqual([item["burst_id"] for item in grouped], [1, 2])
+
+    def test_portrait_profile_uses_eye_factor(self) -> None:
+        item = record("portrait.jpg", 10.0)
+        item["absolute_focus_factor"] = 1.0
+        item["eye_factor"] = 0.5
+
+        balanced = calculate_composite_score(item, profile=get_scoring_profile("balanced"))
+        portrait = calculate_composite_score(item, profile=get_scoring_profile("portrait"))
+
+        self.assertLess(portrait, balanced)
 
 
 if __name__ == "__main__":

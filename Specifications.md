@@ -1,118 +1,173 @@
-# Photo Cull: System and Terminal Specifications
+# Photo Cull System Specification
 
-This document defines the complete technical architecture, mathematical models, and console interface design for `photo-cull`.
+## 1. Processing contract
 
----
+Photo Cull recursively discovers supported images, evaluates one configurable primary
+per same-stem asset family, ranks all successful images, selects one winner per burst,
+and optionally exports a portfolio subset. Sources are read-only.
 
-## 1. Metric Specifications and Mathematical Formulas
+Supported RAW extensions include ARW, CR2, CR3, DNG, NEF, ORF, RAF, RW2, PEF, SRW,
+SR2, 3FR, ERF, IIQ, KDC, MOS, MRW, and X3F. Standard formats include JPEG, PNG,
+WebP, TIFF, and BMP. Actual RAW decoding remains subject to the bundled LibRaw build.
 
-### Focus Scoring (Top-Percentile Patch Energy)
+Generated `.photo-cull` and timestamped legacy output directories must never be
+rediscovered as source input. Discovery order is deterministic and symbolic-link
+directories are not followed.
 
-To prevent creamy background bokeh from lowering sharpness scores in wildlife and portrait photography, the image is divided into a 16x16 grid (256 local patches). The Laplacian variance is computed on each patch:
+## 2. Metadata and ingestion
 
-$$\text{Var}(\Delta I_{\text{patch}}) = \frac{1}{N}\sum (L(x, y) - \mu_L)^2$$
+The preferred `auto` metadata backend uses one bulk ExifTool process when `exiftool`
+is available. It reads capture/create time, subseconds, UTC offset, camera identity,
+image/sequence number, and available AF-point descriptions.
 
-The global focus score is the arithmetic mean of the top 3% sharpest patches. If an eye, feather, or ridge is in critical focus, the metric captures it regardless of background blur.
+The fallback reads standard and nested EXIF IFDs from the same Pillow/RAW-preview
+decode used for scoring. Missing offsets use `--assume-timezone` when supplied,
+otherwise the current system-local offset, and are labeled
+`system_local_assumption`. Missing or malformed capture time falls back to the
+timezone-aware filesystem modification time and is labeled `filesystem_mtime`.
 
-### Exposure and Clipping Penalties
+JPEG decoding uses Pillow draft scaling where available. EXIF orientation is applied
+before all metrics. RAW files use an embedded preview when possible and half-size
+demosaicing otherwise. Images are reduced to a maximum dimension of 1024 pixels.
 
-Using the 8-bit luminance channel ($Y$):
+## 3. Metrics and scoring
 
-* **Blown Highlights ($P_{\text{white}}$)**: Fraction of pixels with $Y \ge 254$.
-* **Crushed Shadows ($P_{\text{black}}$)**: Fraction of pixels with $Y \le 1$.
-* **Penalty Multiplier ($M_{\text{exp}}$)**:
+### Focus
 
-$$M_{\text{exp}} = \max(0.4, 1.0 - 5.0 \times \max(0, P_{\text{white}} - 0.02)) \times \max(0.6, 1.0 - 2.0 \times \max(0, P_{\text{black}} - 0.05))$$
+The grayscale preview receives one Laplacian transform and is divided into a 16×16
+grid. Focus energy is the mean variance of the sharpest 3% of tiles. Remainder pixels
+are retained by array splitting.
 
-Shots with clipped highlights exceeding 2% or blocked shadows exceeding 5% receive progressive score reductions.
+Because raw focus values depend on scene detail, each image receives an empirical
+session percentile `P_focus`. A preset-specific moderate absolute gate is:
 
-### Technical Quality Assessment (PyIQA MUSIQ)
-
-The image tensor is evaluated by the **Multi-scale Image Quality Transformer (MUSIQ)**, generating an objective score from 0 to 100 that quantifies compression artifacts, sensor noise, high-ISO grain, and motion smear independent of input resolution.
-
-### Hybrid Burst Grouping
-
-Consecutive images sorted by timestamp are clustered into a burst if:
-
-1. $\vert{}\Delta t\vert{} \le 2.0 \text{ seconds}$, **and**
-2. $\text{HammingDistance}(\text{pHash}_A, \text{pHash}_B) \le 8$, **or**
-3. $\text{CosineSimilarity}(\vec{E}_A, \vec{E}_B) \ge 0.88$, where $\vec{E}$ represents the normalized 768-dimensional CLIP ViT-L/14 embedding.
-
-### Burst Winner Selection (Multiplicative Gating)
-
-Because raw Laplacian energy is content-dependent, each image first receives a session-relative focus percentile $P_{\text{focus}}$. A deliberately moderate absolute focus gate prevents a blurred standalone image from receiving a neutral sharpness score:
-
-$$F_{\text{absolute}} = 0.5 + 0.5 \times P_{\text{focus}}$$
-
-Within each burst cluster, the frame with the highest focus score establishes $\text{Focus}_{\text{max}}$. Each image is then assigned a composite score:
-
-$$\text{Composite Score} = S_{\text{aesthetic}} \times F_{\text{absolute}} \times \left(\frac{\text{Focus}}{\text{Focus}_{\text{max}}}\right)^{1.5} \times \operatorname{clip}\left(\frac{\text{MUSIQ}}{100}, 0, 1\right) \times M_{\text{exp}}$$
-
-The highest composite score in the cluster is designated the burst winner (`burst_winner = True`). Standalone shots with no burst companions are treated as single-frame clusters with $\text{Focus} / \text{Focus}_{\text{max}} = 1.0$.
-
-When burst clustering is bypassed via the `--no-group` flag, each image is scored independently:
-
-$$\text{Composite Score} = S_{\text{aesthetic}} \times F_{\text{absolute}} \times \operatorname{clip}\left(\frac{\text{MUSIQ}}{100}, 0, 1\right) \times M_{\text{exp}}$$
-
----
-
-## 2. Terminal User Interface (TUI) Specifications
-
-The terminal interface uses `rich` to provide a clear, non-interactive live dashboard during processing, followed by an interactive selection prompt. It avoids full-screen curses capture, ensuring standard terminal history, stdout pipes, and script logs remain scrollable and accessible.
-
-### Interface Architecture and Lifecycle
-
-```
-[Phase 1: Environment Banner]
-  └── Displays compute device, source path, burst mode, and active models.
-        │
-        ▼
-[Phase 2: Live Processing Dashboard]
-  ├── Multi-metric progress bar with spinner, completion count, and ETA.
-  └── Asynchronous logging of skipped or unreadable files without tearing bars.
-        │
-        ▼
-[Phase 3: Ranked Summary Table]
-  └── Formatted, color-coded preview of the top-ranked candidates.
-        │
-        ▼
-[Phase 4: Interactive Selection & Feedback Panel]
-  ├── Interactive prompt for candidate count (N, 'all', or skip).
-  └── Formatted confirmation panel summarizing total copied primary and companion files.
-
+```text
+F_absolute = focus_floor + (1 - focus_floor) × P_focus
 ```
 
-### Component Details
+Within a burst, `F_relative = Focus / max(Focus in burst)`.
 
-* **Environment Banner (`rich.panel.Panel`)**: Highlights the active compute target (`CUDA`, `MPS`, or `CPU`), source path, burst grouping mode, and active evaluation models.
-* **Live Progress Dashboard (`rich.progress.Progress`)**: Features an animated spinner, stage description, proportional progress bar, completion percentage, frame counter, and rolling ETA. Corrupt files are logged above the bar using `console.log()` without corrupting layout.
-* **Ranked Summary Table (`rich.table.Table`)**: Renders the top 10 candidates with color-coded columns:
+### Exposure
 
-| Column Name | Alignment | Content Description |
-| --- | --- | --- |
-| **Rank** | Center | Global sort rank across the directory |
-| **Filename** | Left | Source image filename |
-| **Burst** | Center | Assigned numeric cluster ID |
-| **Winner** | Center | Burst winner designation (`Yes` or `No`) |
-| **Focus** | Right | Mean top-percentile Laplacian patch variance |
-| **MUSIQ** | Right | Technical IQA rating (0 to 100) |
-| **Aesthetic** | Right | LAION linear aesthetic model rating (1 to 10) |
-| **Blown %** | Right | Percentage of clipped highlight pixels |
-| **Composite** | Right | Final computed score used for ranking |
+For 8-bit rendered luminance `Y`:
 
-* **Interactive Export**: Pauses execution to accept an integer count, `all`, or empty input to exit. Copies selected primary files and matching companion files (`.xmp`, `.jpg`, `.mp4`) into a timestamped run directory, concluding with a formatted transfer summary panel. Relative source directories are preserved, duplicate family members are copied only once, existing destinations are never overwritten, and an export manifest records every source/destination pair.
-* **Output Isolation**: Reports and selections default to `<source>/.photo-cull/`, or to an explicit `--output-dir`. That directory and legacy timestamped `picks_*` directories are excluded from subsequent source scans.
-* **Resumable Evaluation**: Each successful image evaluation is committed to a SQLite cache using the resolved path, byte size, nanosecond modification time, and scoring-pipeline signature as its identity. Unchanged records are reused after interruption; `--refresh-cache` bypasses reads and replaces metrics, while `--no-cache` disables persistence.
+```text
+P_white = fraction(Y >= 254)
+P_black = fraction(Y <= 1)
+M_exposure = max(0.4, 1 - 5 × max(0, P_white - 0.02))
+             × max(0.6, 1 - 2 × max(0, P_black - 0.05))
+```
 
----
+This describes preview clipping and is not a claim about recoverable RAW latitude.
 
-## 3. Potential Extensions and Improvements
+### Neural metrics
 
-| Area | Concept | Implementation Path |
-| --- | --- | --- |
-| **Focus Verification** | Direct Autofocus Bracket Extraction | Integrate `PyExifTool` to read proprietary camera MakerNotes (Sony, Nikon, Canon), extracting active AF coordinates $(X, Y)$ to score sharpness directly on the camera's intended focus target rather than across generic grid tiles. |
-| **Subject Integrity** | Open-Vocabulary Subject Verification | Incorporate lightweight `YOLO-World` to ensure critical anatomy (animal head, eyes, wings) is within frame, penalizing shots where subjects turned away, clipped wings, or exited the field of view. |
-| **Metadata Tagging** | Non-Destructive XMP Sidecar Ratings | Use `pyexiv2` to write star ratings (1–5) and color labels directly into `.xmp` sidecar files, allowing AI culling picks and ratings to appear instantly inside Adobe Lightroom, Capture One, or darktable without copying physical files. |
-| **Ingestion Throughput** | Mini-Batch GPU Tensor Queuing | Decouple CPU disk I/O and thumbnail decoding from GPU inference using a multi-threaded producer-consumer queue, passing batched tensors (batch size 16 or 32) to saturated CUDA/MPS cores. |
-| **Facial & Eye Tracking** | Dedicated Eye/Iris Landmark Scoring | For human and domestic pet portrait sessions, add `MediaPipe` face mesh checks to detect blinking, closed eyes, and unfavorable head-angle deviations. |
-| **Model Customization** | Fine-Tuned Aesthetic Linear Heads | Train specialized regression heads atop the CLIP ViT-L/14 backbone using curated wildlife competition datasets to reward genre-specific lighting and dynamic action postures. |
+- MUSIQ supplies a no-reference technical-quality score normalized to `[0, 1]`.
+- Pinned CLIP ViT-L/14 embeddings feed the verified LAION aesthetic head.
+- Genre presets optionally compare normalized image embeddings with positive and
+  negative subject-integrity prompts.
+- Portrait mode uses OpenCV face/eye cascades to emit an advisory eye factor and warning.
+
+### Composite
+
+For scoring profile exponents `w` and relative focus exponent `r`:
+
+```text
+Composite = max(0, Aesthetic)
+            × F_absolute ^ w_absolute_focus
+            × F_relative ^ r
+            × clip(MUSIQ / 100, 0, 1) ^ w_musiq
+            × M_exposure ^ w_exposure
+            × EyeFactor ^ w_eye
+            × SubjectIntegrity ^ w_subject
+```
+
+Preset weights are defined in `scoring.py`, included in `run.json`, and deliberately
+treated as heuristics requiring validation against human feedback.
+
+## 4. Burst grouping and ranks
+
+Records are sorted by aware capture time and normalized path. Two consecutive frames
+may join when all of the following hold:
+
+1. Their time gap is at most `--burst-window` (default 2 seconds).
+2. The total cluster duration remains within `--max-burst-duration` (default 10 seconds).
+3. Known camera identities do not conflict.
+4. pHash Hamming distance is at most 8, or normalized CLIP similarity is at least 0.88.
+
+The CSV distinguishes `global_quality_rank`, `burst_rank`, and `selection_rank`.
+Ties use normalized source paths for deterministic ordering.
+
+## 5. Throughput and device behavior
+
+Image decoding and CPU metrics use a bounded thread pool. Each bounded group is passed
+to CLIP as a mini-batch. CUDA inference uses automatic mixed precision by default.
+On an out-of-memory error, CLIP batches split recursively; a single-image OOM or an
+unsupported MPS operation moves all models to CPU and retries. MUSIQ remains per-image
+to avoid padding or distorting aspect ratios.
+
+Same-stem RAW/JPEG pairs default to one RAW primary, avoiding duplicate inference while
+retaining all family files for export. `--primary jpeg` and `--primary all` override
+that behavior.
+
+## 6. Cache, audit, and failure behavior
+
+Each successful evaluation is committed immediately to a WAL-mode SQLite database.
+The lookup identity contains resolved path, size, nanosecond modification time, model
+identities, algorithm version, image size, metadata backend, assumed timezone, and
+preset. The cache stores no executable pickle data.
+
+Every run directory is created before model initialization and contains an atomically
+updated `run.json`. It records phase/status, timings, versions, settings, counts, model
+revisions/checksums, and output paths. Per-file failures are immediately written to
+`failures.csv`. Ctrl-C marks the run interrupted; cached successes remain resumable.
+
+`evaluation.csv` is written atomically and retains full-precision metrics. Display
+rounding occurs only in the terminal.
+
+## 7. Terminal interface
+
+The Rich interface is scrollback-safe rather than full-screen:
+
+1. Scanning/model/metadata status indicators.
+2. Environment panel with device, paths, candidate count, backend, preset, and grouping.
+3. Evaluation progress with spinner, fraction, percentage, and ETA.
+4. Top-candidate table containing selection/global ranks and principal metrics.
+5. Interactive selection prompt only when stdin and the console are terminals.
+6. Export confirmation panel.
+
+`--plain` disables animation and color. `--select N|all|none` supports scripts and CI.
+EOF is treated as `none`, and Ctrl-C exits with code 130 after updating the run audit.
+
+## 8. Portfolio review and feedback
+
+`review.html` contains local thumbnails, scores, keep/reject controls, and a browser-side
+feedback CSV download. A later `--feedback` CSV pins keeps and removes rejects.
+
+`--diversity` uses maximal marginal relevance over normalized CLIP embeddings to trade
+off composite quality against similarity to already selected images. Zero is pure
+quality ranking; one maximizes novelty.
+
+`photo-cull-validate` compares feedback with an evaluation and reports precision at the
+number of keeps, keep-versus-reject pairwise accuracy, and mean global ranks. Compatible
+personal aesthetic-head weights can be supplied with `--aesthetic-head`; their hash is
+recorded for reproducibility.
+
+## 9. Export contract
+
+Selections are planned completely before copying. The plan includes same-stem and
+compound sidecars, deduplicates families, preserves relative paths, detects
+case-insensitive collisions, rejects resolved sources outside the input root, and
+refuses existing destinations. Each copy is published through a temporary file.
+
+`export_manifest.csv` records source, destination, and size. `--write-xmp` creates or
+updates ratings only inside `picks/`, never in the source tree.
+
+## 10. Reproducibility and verification
+
+- Direct dependency ranges are constrained and `uv.lock` is committed.
+- CLIP is pinned to a Hugging Face revision.
+- The aesthetic head uses a commit-pinned URL and mandatory SHA-256 verification.
+- CI runs tests, Ruff, and a CLI smoke test on macOS and Windows.
+- Tests cover file operations, cache migration/identity, timestamps, scoring, bursts,
+  diversity, XMP, validation, audit output, and a mocked end-to-end pipeline.

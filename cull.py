@@ -1,20 +1,20 @@
-from datetime import datetime
-from pathlib import Path
-import argparse
-from contextlib import nullcontext
-import csv
-import io
-import sys
+"""Photo Cull command-line application."""
 
-import cv2
-import imagehash
-import numpy as np
-import pandas as pd
-from PIL import Image, ExifTags
-import pyiqa
-import rawpy
-import requests
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
@@ -26,177 +26,171 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from rich.table import Table
-import torch
-import torch.nn as nn
-from transformers import CLIPModel, CLIPProcessor
 
 from evaluation_cache import CachedEvaluation, EvaluationCache, FileFingerprint
 from file_ops import (
-    ALL_IMAGE_EXTENSIONS,
-    RAW_EXTENSIONS,
     build_export_plan,
     copy_export_plan,
     discover_image_files,
+    logical_asset_stem,
+    select_primary_images,
 )
+from metadata_reader import (
+    CaptureMetadata,
+    read_metadata_with_exiftool,
+    resolve_assumed_timezone,
+    select_metadata_backend,
+)
+from portfolio import (
+    generate_contact_sheet,
+    load_feedback,
+    select_portfolio_candidates,
+    write_feedback_template,
+)
+from run_audit import RunAudit, atomic_write_csv
 from scoring import (
+    SCORING_PROFILES,
+    ScoringProfile,
     assign_session_focus_factors,
     calculate_composite_score,
+    get_scoring_profile,
     group_bursts,
 )
+from xmp_rating import rating_for_rank, write_xmp_rating
 
 console = Console()
 
-CLIP_MODEL_ID = "openai/clip-vit-large-patch14"
-MUSIQ_MODEL_ID = "musiq"
-EVALUATION_CACHE_SIGNATURE = (
-    "v1;clip=openai/clip-vit-large-patch14;musiq=musiq;max_dim=1024;"
-    "focus=laplacian-16x16-top3pct;exposure=luma-v1"
+MAX_IMAGE_DIMENSION = 1024
+EVALUATION_ALGORITHM_VERSION = "4"
+REPORT_FIELDS = (
+    "global_quality_rank",
+    "selection_rank",
+    "burst_rank",
+    "file_name",
+    "file_path",
+    "timestamp",
+    "timestamp_utc",
+    "timestamp_source",
+    "timezone_source",
+    "camera_model",
+    "camera_serial",
+    "sequence_number",
+    "autofocus_info",
+    "burst_id",
+    "burst_size",
+    "burst_winner",
+    "focus_score",
+    "focus_percentile",
+    "absolute_focus_factor",
+    "relative_focus_factor",
+    "musiq_score",
+    "aesthetic_score",
+    "subject_integrity",
+    "face_count",
+    "eye_count",
+    "eye_factor",
+    "eye_warning",
+    "blown_pct",
+    "crushed_pct",
+    "exposure_penalty",
+    "composite_score",
+    "feedback_decision",
+    "portfolio_selected",
+    "cache_hit",
 )
 
-def resolve_device() -> torch.device:
-    """Selects NVIDIA CUDA on Windows, MPS on macOS, or falls back to CPU."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+
+@dataclass(frozen=True, slots=True)
+class PipelineConfig:
+    input_folder: Path
+    output_folder: Path | None
+    time_window: float
+    max_burst_duration: float
+    phash_threshold: int
+    sim_threshold: float
+    no_group: bool
+    cache_mode: str
+    metadata_backend: str
+    assumed_timezone: str | None
+    device: str
+    batch_size: int
+    workers: int
+    mixed_precision: bool
+    preset: str
+    primary: str
+    selection: str | None
+    diversity: float
+    feedback_file: Path | None
+    contact_sheet_count: int
+    write_xmp: bool
+    aesthetic_head: Path | None
+    plain: bool
+    debug: bool
+
+    def audit_dict(self) -> dict[str, Any]:
+        values = asdict(self)
+        return {
+            key: str(value) if isinstance(value, Path) else value for key, value in values.items()
+        }
 
 
-class AestheticPredictor(nn.Module):
-    """Linear regression head trained on CLIP embeddings (LAION Aesthetic)."""
-    def __init__(self, input_dim: int = 768):
-        super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(input_dim, 1024),
-            nn.Dropout(0.2),
-            nn.Linear(1024, 128),
-            nn.Dropout(0.2),
-            nn.Linear(128, 64),
-            nn.Dropout(0.1),
-            nn.Linear(64, 16),
-            nn.Linear(16, 1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
+@dataclass(slots=True)
+class PreparedImage:
+    file_path: Path
+    fingerprint: FileFingerprint
+    loaded: Any
+    focus_score: float
+    blown_pct: float
+    crushed_pct: float
+    exposure_penalty: float
+    phash: Any
+    face_count: int = 0
+    eye_count: int = 0
+    eye_factor: float = 1.0
+    eye_warning: str = ""
+    musiq_score: float = 0.0
 
 
-def load_aesthetic_head(device: torch.device) -> nn.Module:
-    weights_path = Path("sac_vit_l_14_linear.pth")
-    if not weights_path.exists():
-        console.print("[yellow]Downloading aesthetic scoring weights...[/yellow]")
-        url = "https://github.com/christophschuhmann/improved-aesthetic-predictor/raw/main/sac_public_2022_06_29_vit_l_14_linear.pth"
-        resp = requests.get(url, timeout=60)
-        resp.raise_for_status()
-        weights_path.write_bytes(resp.content)
+def calculate_top_percentile_focus(
+    cv_image: Any,
+    grid_size: int = 16,
+    top_k_pct: float = 0.03,
+) -> float:
+    """Calculate top-tile focus from one full-frame Laplacian operation."""
+    import cv2
+    import numpy as np
 
-    model = AestheticPredictor(input_dim=768)
-    state = torch.load(weights_path, map_location=device, weights_only=True)
-    model.load_state_dict(state)
-    model.to(device)
-    model.eval()
-    return model
+    gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape
+    if height // grid_size < 8 or width // grid_size < 8:
+        return float(cv2.Laplacian(gray, cv2.CV_32F).var())
 
-
-def get_image_timestamp(file_path: Path) -> datetime:
-    """Extracts capture timestamp from EXIF, with rawpy fallback for RAW files."""
-    ext = file_path.suffix.lower()
-    if ext in RAW_EXTENSIONS:
-        try:
-            with rawpy.imread(str(file_path)) as raw:
-                thumb = raw.extract_thumb()
-                if thumb.format == rawpy.ThumbFormat.JPEG:
-                    with Image.open(io.BytesIO(thumb.data)) as img:
-                        exif = img._getexif()
-                        if exif:
-                            for tag_id, val in exif.items():
-                                if ExifTags.TAGS.get(tag_id) in ("DateTimeOriginal", "DateTime"):
-                                    return datetime.strptime(str(val), "%Y:%m:%d %H:%M:%S")
-        except Exception:
-            pass
-    else:
-        try:
-            with Image.open(file_path) as img:
-                exif = img._getexif()
-                if exif:
-                    for tag_id, val in exif.items():
-                        if ExifTags.TAGS.get(tag_id) in ("DateTimeOriginal", "DateTime"):
-                            return datetime.strptime(str(val), "%Y:%m:%d %H:%M:%S")
-        except Exception:
-            pass
-    return datetime.fromtimestamp(file_path.stat().st_mtime)
+    laplacian = cv2.Laplacian(gray, cv2.CV_32F)
+    scores = [
+        float(patch.var())
+        for row in np.array_split(laplacian, grid_size, axis=0)
+        for patch in np.array_split(row, grid_size, axis=1)
+    ]
+    count = max(1, round(len(scores) * top_k_pct))
+    return float(np.mean(sorted(scores, reverse=True)[:count]))
 
 
-def load_image_pair(file_path: Path, max_dim: int = 1024) -> tuple[np.ndarray, Image.Image]:
-    """Loads RAW or JPEG files, using fast preview extraction where possible."""
-    ext = file_path.suffix.lower()
-    cv_img = None
+def check_exposure_clipping(cv_image: Any) -> tuple[float, float, float]:
+    import cv2
+    import numpy as np
 
-    if ext in RAW_EXTENSIONS:
-        with rawpy.imread(str(file_path)) as raw:
-            try:
-                thumb = raw.extract_thumb()
-                if thumb.format == rawpy.ThumbFormat.JPEG:
-                    cv_img = cv2.imdecode(np.frombuffer(thumb.data, np.uint8), cv2.IMREAD_COLOR)
-                else:
-                    cv_img = cv2.cvtColor(thumb.data, cv2.COLOR_RGB2BGR)
-            except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
-                rgb = raw.postprocess(half_size=True, use_camera_wb=True)
-                cv_img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    else:
-        cv_img = cv2.imread(str(file_path), cv2.IMREAD_COLOR)
-
-    if cv_img is None:
-        raise ValueError(f"Unable to read image at {file_path}")
-
-    h, w = cv_img.shape[:2]
-    if max(h, w) > max_dim:
-        scale = max_dim / max(h, w)
-        cv_resized = cv2.resize(cv_img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-    else:
-        cv_resized = cv_img
-
-    pil_img = Image.fromarray(cv2.cvtColor(cv_resized, cv2.COLOR_BGR2RGB))
-    return cv_resized, pil_img
+    gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+    blown_fraction = float(np.mean(gray >= 254))
+    crushed_fraction = float(np.mean(gray <= 1))
+    highlight_penalty = max(0.4, 1.0 - 5.0 * max(0.0, blown_fraction - 0.02))
+    shadow_penalty = max(0.6, 1.0 - 2.0 * max(0.0, crushed_fraction - 0.05))
+    return blown_fraction, crushed_fraction, highlight_penalty * shadow_penalty
 
 
-def calculate_top_percentile_focus(cv_img: np.ndarray, grid_size: int = 16, top_k_pct: float = 0.03) -> float:
-    """Calculates focus using the top 3 percent sharpest tiles in a 16x16 grid."""
-    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-    h, w = gray.shape
-    tile_h, tile_w = h // grid_size, w // grid_size
+def record_from_cache(file_path: Path, cached: CachedEvaluation) -> dict[str, Any]:
+    import imagehash
+    import numpy as np
 
-    if tile_h < 8 or tile_w < 8:
-        return float(cv2.Laplacian(gray, cv2.CV_64F).var())
-
-    scores = []
-    for row in range(grid_size):
-        for col in range(grid_size):
-            patch = gray[row * tile_h : (row + 1) * tile_h, col * tile_w : (col + 1) * tile_w]
-            scores.append(cv2.Laplacian(patch, cv2.CV_64F).var())
-
-    scores.sort(reverse=True)
-    count = max(1, int(len(scores) * top_k_pct))
-    return float(np.mean(scores[:count]))
-
-
-def check_exposure_clipping(cv_img: np.ndarray) -> tuple[float, float, float]:
-    """Calculates blown highlight fraction, crushed shadow fraction, and penalty multiplier."""
-    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-    blown_frac = float(np.mean(gray >= 254))
-    crushed_frac = float(np.mean(gray <= 1))
-
-    penalty = 1.0
-    if blown_frac > 0.02:
-        penalty *= max(0.4, 1.0 - (blown_frac - 0.02) * 5.0)
-    if crushed_frac > 0.05:
-        penalty *= max(0.6, 1.0 - (crushed_frac - 0.05) * 2.0)
-
-    return blown_frac, crushed_frac, penalty
-
-
-def record_from_cache(file_path: Path, cached: CachedEvaluation) -> dict:
-    """Restore an in-memory ranking record from a safe SQLite representation."""
     embedding = np.frombuffer(cached.embedding_bytes, dtype="<f4")
     if embedding.size != cached.embedding_length:
         raise ValueError(f"Cached embedding has the wrong size for {file_path}")
@@ -204,6 +198,12 @@ def record_from_cache(file_path: Path, cached: CachedEvaluation) -> dict:
         "file_name": file_path.name,
         "file_path": str(file_path.resolve()),
         "timestamp": datetime.fromisoformat(cached.timestamp_iso),
+        "timestamp_source": cached.timestamp_source,
+        "timezone_source": cached.timezone_source,
+        "camera_model": cached.camera_model,
+        "camera_serial": cached.camera_serial,
+        "sequence_number": cached.sequence_number,
+        "autofocus_info": cached.autofocus_info,
         "phash": imagehash.hex_to_hash(cached.phash_hex),
         "focus_score": cached.focus_score,
         "musiq_score": cached.musiq_score,
@@ -212,15 +212,27 @@ def record_from_cache(file_path: Path, cached: CachedEvaluation) -> dict:
         "exposure_penalty": cached.exposure_penalty,
         "aesthetic_score": cached.aesthetic_score,
         "embedding": embedding.copy(),
+        "subject_integrity": cached.subject_integrity,
+        "face_count": cached.face_count,
+        "eye_count": cached.eye_count,
+        "eye_factor": cached.eye_factor,
+        "eye_warning": cached.eye_warning,
         "cache_hit": True,
     }
 
 
-def record_to_cache(record: dict) -> CachedEvaluation:
-    """Convert a live evaluation record into a non-pickle cache value."""
+def record_to_cache(record: dict[str, Any]) -> CachedEvaluation:
+    import numpy as np
+
     embedding = np.asarray(record["embedding"], dtype="<f4")
     return CachedEvaluation(
         timestamp_iso=record["timestamp"].isoformat(),
+        timestamp_source=str(record["timestamp_source"]),
+        timezone_source=str(record["timezone_source"]),
+        camera_model=str(record["camera_model"]),
+        camera_serial=str(record["camera_serial"]),
+        sequence_number=str(record["sequence_number"]),
+        autofocus_info=str(record["autofocus_info"]),
         phash_hex=str(record["phash"]),
         focus_score=float(record["focus_score"]),
         musiq_score=float(record["musiq_score"]),
@@ -228,321 +240,885 @@ def record_to_cache(record: dict) -> CachedEvaluation:
         crushed_pct=float(record["crushed_pct"]),
         exposure_penalty=float(record["exposure_penalty"]),
         aesthetic_score=float(record["aesthetic_score"]),
+        subject_integrity=float(record["subject_integrity"]),
+        face_count=int(record["face_count"]),
+        eye_count=int(record["eye_count"]),
+        eye_factor=float(record["eye_factor"]),
+        eye_warning=str(record["eye_warning"]),
         embedding_bytes=embedding.tobytes(),
-        embedding_length=embedding.size,
+        embedding_length=int(embedding.size),
     )
 
 
-def run_pipeline(
-    input_folder: str,
-    output_folder: str | None,
-    time_window: float,
-    sim_threshold: float,
-    no_group: bool,
-    no_cache: bool,
-    refresh_cache: bool,
-) -> None:
-    folder = Path(input_folder)
-    if not folder.is_dir():
-        console.print(f"[bold red]Error:[/bold red] '{input_folder}' is not a valid directory.")
-        sys.exit(1)
+def run_pipeline(config: PipelineConfig) -> int:
+    from model_config import (
+        AESTHETIC_MODEL_REVISION,
+        AESTHETIC_WEIGHTS_SHA256,
+        CLIP_MODEL_ID,
+        CLIP_MODEL_REVISION,
+        MUSIQ_MODEL_ID,
+        MUSIQ_MODEL_REVISION,
+        MUSIQ_WEIGHTS_ID,
+        MUSIQ_WEIGHTS_SHA256,
+        sha256_file,
+    )
 
-    folder = folder.resolve()
+    folder = config.input_folder.expanduser().resolve()
+    if not folder.is_dir():
+        _error(f"{folder} is not a valid directory")
+        return 2
+
     output_root = (
-        Path(output_folder).expanduser().resolve()
-        if output_folder is not None
+        config.output_folder.expanduser().resolve()
+        if config.output_folder is not None
         else folder / ".photo-cull"
     )
-    if output_root == folder:
-        console.print("[bold red]Error:[/bold red] The output directory cannot be the input directory itself.")
-        sys.exit(1)
+    if output_root == folder or folder.is_relative_to(output_root):
+        _error("The output directory cannot be the input directory or one of its parents")
+        return 2
+    _validate_config(config)
 
-    device = resolve_device()
-    console.print(
-        Panel.fit(
-            f"[bold green]Compute Target:[/bold green] [bold cyan]{device.type.upper()}[/bold cyan]\n"
-            f"[bold green]Scanning Folder:[/bold green] {folder.resolve()}\n"
-            f"[bold green]Output Root:[/bold green] {output_root}\n"
-            f"[bold green]Burst Grouping:[/bold green] {'Disabled' if no_group else 'Enabled'}\n"
-            f"[bold green]Metrics:[/bold green] Laplacian Patch Focus, MUSIQ Technical IQA, LAION Aesthetic, Exposure Clipping",
-            title="Image Culling Engine",
-        )
-    )
-
-    all_files = discover_image_files(folder, output_root)
+    with _status("Scanning source files", config):
+        discovered = discover_image_files(folder, output_root)
+        all_files = select_primary_images(discovered, config.primary)
     if not all_files:
-        console.print("[yellow]No supported RAW or JPEG images found.[/yellow]")
-        sys.exit(0)
+        console.print("[yellow]No supported images found.[/yellow]")
+        return 0
 
-    records = []
-    pending_files: list[tuple[Path, FileFingerprint]] = []
     output_root.mkdir(parents=True, exist_ok=True)
+    run_stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
+    run_dir = output_root / f"run_{run_stamp}"
+    profile = get_scoring_profile(config.preset)
+    model_manifest = {
+        "clip": f"{CLIP_MODEL_ID}@{CLIP_MODEL_REVISION}",
+        "musiq": f"{MUSIQ_MODEL_ID}:{MUSIQ_WEIGHTS_ID}@{MUSIQ_MODEL_REVISION}",
+        "musiq_sha256": MUSIQ_WEIGHTS_SHA256,
+        "aesthetic_revision": AESTHETIC_MODEL_REVISION,
+        "aesthetic_sha256": (
+            sha256_file(config.aesthetic_head.expanduser().resolve(strict=True))
+            if config.aesthetic_head is not None
+            else AESTHETIC_WEIGHTS_SHA256
+        ),
+        "evaluation_algorithm": EVALUATION_ALGORITHM_VERSION,
+    }
+    audit = RunAudit(
+        run_dir,
+        input_root=folder,
+        output_root=output_root,
+        configuration={**config.audit_dict(), "scoring_profile": profile.as_dict()},
+        models=model_manifest,
+        discovered_count=len(discovered),
+    )
+    audit.data["counts"]["primary_candidates"] = len(all_files)
+
+    try:
+        return _execute_pipeline(
+            config,
+            folder,
+            output_root,
+            run_dir,
+            all_files,
+            profile,
+            audit,
+        )
+    except KeyboardInterrupt:
+        audit.finish("interrupted")
+        console.print("\n[yellow]Interrupted. Completed evaluations remain cached.[/yellow]")
+        return 130
+    except Exception as error:
+        audit.record_failure(None, str(audit.data.get("phase", "pipeline")), error)
+        audit.finish("failed")
+        _error(str(error))
+        if config.debug:
+            raise
+        return 1
+
+
+def _execute_pipeline(
+    config: PipelineConfig,
+    folder: Path,
+    output_root: Path,
+    run_dir: Path,
+    all_files: list[Path],
+    profile: ScoringProfile,
+    audit: RunAudit,
+) -> int:
+    metadata_backend = select_metadata_backend(config.metadata_backend)
+    assumed_timezone = resolve_assumed_timezone(config.assumed_timezone)
+    feedback = load_feedback(config.feedback_file, folder)
+
+    cache_signature = _cache_signature(config, metadata_backend, audit.data["models"])
+    records: list[dict[str, Any]] = []
+    pending_files: list[tuple[Path, FileFingerprint]] = []
     cache_context = (
         nullcontext(None)
-        if no_cache
+        if config.cache_mode == "none"
         else EvaluationCache(output_root / "evaluation_cache.sqlite3")
     )
 
+    audit.set_phase("cache_lookup")
     with cache_context as evaluation_cache:
         for file_path in all_files:
             try:
                 fingerprint = FileFingerprint.from_path(file_path)
                 cached = (
                     None
-                    if evaluation_cache is None or refresh_cache
-                    else evaluation_cache.get(
-                        file_path,
-                        fingerprint,
-                        EVALUATION_CACHE_SIGNATURE,
-                    )
+                    if evaluation_cache is None or config.cache_mode == "refresh"
+                    else evaluation_cache.get(file_path, fingerprint, cache_signature)
                 )
                 if cached is None:
                     pending_files.append((file_path, fingerprint))
                 else:
                     records.append(record_from_cache(file_path, cached))
-            except Exception as err:
-                console.log(f"[yellow]Could not inspect {file_path}:[/yellow] {err}")
+            except Exception as error:
+                audit.record_failure(file_path, "cache_lookup", error)
+                _warning(f"Could not inspect {file_path}: {error}")
 
+        audit.set_count("cached", len(records))
         if records:
-            console.print(
-                f"[green]Reused {len(records)} cached evaluation"
-                f"{'s' if len(records) != 1 else ''}.[/green]"
+            console.print(f"[green]Reused {len(records)} cached evaluations.[/green]")
+
+        if not pending_files:
+            audit.data["environment"]["resolved_device"] = "cache-only"
+            _show_environment(
+                config,
+                folder,
+                output_root,
+                "cache-only",
+                metadata_backend,
+                len(all_files),
             )
+
+        metadata_by_path: dict[Path, CaptureMetadata] = {}
+        allow_cache_write = True
+        if pending_files and metadata_backend == "exiftool":
+            audit.set_phase("metadata")
+            try:
+                with _status("Reading capture metadata with ExifTool", config):
+                    metadata_by_path = read_metadata_with_exiftool(
+                        (file_path for file_path, _ in pending_files),
+                        assumed_timezone,
+                    )
+            except Exception as error:
+                if config.metadata_backend == "exiftool":
+                    raise
+                allow_cache_write = False
+                audit.record_failure(None, "metadata_bulk", error)
+                _warning(f"ExifTool failed; using embedded metadata for this run: {error}")
 
         if pending_files:
-            clip_model = CLIPModel.from_pretrained(CLIP_MODEL_ID).to(device).eval()
-            clip_processor = CLIPProcessor.from_pretrained(CLIP_MODEL_ID)
-            aesthetic_head = load_aesthetic_head(device)
-
-            console.print("[cyan]Initializing PyIQA MUSIQ model...[/cyan]")
-            musiq_metric = pyiqa.create_metric(MUSIQ_MODEL_ID, device=device)
-
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                MofNCompleteColumn(),
-                TimeRemainingColumn(),
-                console=console,
+            from model_runtime import (
+                ModelRuntime,
+                is_device_fallback_error,
+                resolve_device,
             )
 
-            with progress:
-                eval_task = progress.add_task(
-                    "[cyan]Evaluating photos...",
-                    total=len(pending_files),
+            device = resolve_device(config.device)
+            audit.data["environment"]["resolved_device"] = device.type
+            _show_environment(
+                config,
+                folder,
+                output_root,
+                device.type,
+                metadata_backend,
+                len(all_files),
+            )
+            audit.set_phase("model_loading")
+            try:
+                with _status("Loading pinned scoring models", config):
+                    runtime = ModelRuntime(
+                        device,
+                        preset=config.preset,
+                        aesthetic_weights=config.aesthetic_head,
+                        mixed_precision=config.mixed_precision,
+                    )
+            except RuntimeError as error:
+                if (
+                    config.device != "auto"
+                    or device.type == "cpu"
+                    or not is_device_fallback_error(error)
+                ):
+                    raise
+                audit.record_failure(None, "model_device_fallback", error)
+                _warning(f"Accelerator initialization failed; retrying on CPU: {error}")
+                device = resolve_device("cpu")
+                runtime = ModelRuntime(
+                    device,
+                    preset=config.preset,
+                    aesthetic_weights=config.aesthetic_head,
+                    mixed_precision=False,
+                )
+            audit.data["models"]["aesthetic_sha256"] = runtime.aesthetic_sha256
+            audit.data["models"]["musiq_sha256"] = runtime.musiq_sha256
+            audit.data["environment"]["resolved_device"] = runtime.device.type
+            audit.set_phase("evaluation")
+            starting_device = runtime.device.type
+            records.extend(
+                _evaluate_pending(
+                    pending_files,
+                    metadata_by_path,
+                    runtime,
+                    profile,
+                    config,
+                    assumed_timezone,
+                    evaluation_cache if allow_cache_write else None,
+                    cache_signature,
+                    audit,
+                )
+            )
+            audit.data["environment"]["resolved_device"] = runtime.device.type
+            if runtime.device.type != starting_device:
+                _warning(
+                    f"Inference moved from {starting_device.upper()} to CPU after a device error"
                 )
 
-                for file_path, initial_fingerprint in pending_files:
-                    try:
-                        timestamp = get_image_timestamp(file_path)
-                        cv_img, pil_img = load_image_pair(file_path)
-
-                        focus_score = calculate_top_percentile_focus(cv_img)
-                        blown_frac, crushed_frac, exp_penalty = check_exposure_clipping(cv_img)
-                        img_phash = imagehash.phash(pil_img)
-
-                        img_tensor = (
-                            torch.from_numpy(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
-                            .permute(2, 0, 1)
-                            .unsqueeze(0)
-                            .float()
-                            / 255.0
-                        )
-                        img_tensor = img_tensor.to(device)
-                        with torch.inference_mode():
-                            musiq_score = float(musiq_metric(img_tensor).item())
-
-                        inputs = clip_processor(images=pil_img, return_tensors="pt").to(device)
-                        with torch.inference_mode():
-                            feats = clip_model.get_image_features(**inputs)
-                            feats = feats / feats.norm(p=2, dim=-1, keepdim=True)
-                            aesthetic_score = aesthetic_head(feats).item()
-                            embedding = feats.cpu().numpy().flatten()
-
-                        record = {
-                            "file_name": file_path.name,
-                            "file_path": str(file_path.resolve()),
-                            "timestamp": timestamp,
-                            "phash": img_phash,
-                            "focus_score": focus_score,
-                            "musiq_score": musiq_score,
-                            "blown_pct": blown_frac * 100,
-                            "crushed_pct": crushed_frac * 100,
-                            "exposure_penalty": exp_penalty,
-                            "aesthetic_score": aesthetic_score,
-                            "embedding": embedding,
-                            "cache_hit": False,
-                        }
-                        if FileFingerprint.from_path(file_path) != initial_fingerprint:
-                            raise RuntimeError("File changed while it was being evaluated")
-                        if evaluation_cache is not None:
-                            evaluation_cache.put(
-                                file_path,
-                                initial_fingerprint,
-                                EVALUATION_CACHE_SIGNATURE,
-                                record_to_cache(record),
-                            )
-                        records.append(record)
-                    except Exception as err:
-                        console.log(f"[yellow]Skipped {file_path}:[/yellow] {err}")
-                    finally:
-                        progress.advance(eval_task)
-
     if not records:
-        console.print("[red]No images were successfully processed.[/red]")
-        sys.exit(1)
+        raise RuntimeError("No images were successfully processed")
 
-    assign_session_focus_factors(records)
-
-    if no_group:
-        for idx, item in enumerate(records, start=1):
-            del item["embedding"]
-            del item["phash"]
-            item["burst_id"] = idx
-            item["burst_size"] = 1
-            item["relative_focus_factor"] = 1.0
-            item["composite_score"] = calculate_composite_score(item)
-        df = pd.DataFrame(records)
-        df["burst_winner"] = True
+    audit.set_phase("ranking")
+    assign_session_focus_factors(records, profile)
+    if config.no_group:
+        for burst_id, record in enumerate(_timestamp_order(records), start=1):
+            record["burst_id"] = burst_id
+            record["burst_size"] = 1
+            record["relative_focus_factor"] = 1.0
+            record["composite_score"] = calculate_composite_score(
+                record,
+                profile=profile,
+            )
     else:
-        console.print("[bold blue]Clustering bursts and calculating composite ranks...[/bold blue]")
-        labeled = group_bursts(records, time_window_seconds=time_window, sim_threshold=sim_threshold)
-        for item in labeled:
-            del item["embedding"]
-            del item["phash"]
-        df = pd.DataFrame(labeled)
-        df["burst_winner"] = False
-        for burst_id, group in df.groupby("burst_id"):
-            winner_idx = group["composite_score"].idxmax()
-            df.loc[winner_idx, "burst_winner"] = True
-
-    df = df.sort_values(by=["burst_winner", "composite_score"], ascending=[False, False]).reset_index(drop=True)
-    df["rank"] = df.index + 1
-
-    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    run_dir = output_root / f"run_{run_stamp}"
-    run_dir.mkdir(parents=True, exist_ok=False)
-    csv_file = run_dir / "evaluation.csv"
-    df.to_csv(csv_file, index=False)
-
-    summary_table = Table(title="Evaluation Complete - Top 10 Ranked Images", header_style="bold magenta")
-    summary_table.add_column("Rank", justify="center")
-    summary_table.add_column("Filename", justify="left")
-    summary_table.add_column("Burst", justify="center")
-    summary_table.add_column("Winner", justify="center")
-    summary_table.add_column("Focus", justify="right")
-    summary_table.add_column("MUSIQ", justify="right")
-    summary_table.add_column("Aesthetic", justify="right")
-    summary_table.add_column("Blown %", justify="right")
-    summary_table.add_column("Composite", justify="right")
-
-    for _, row in df.head(10).iterrows():
-        is_winner = "[green]Yes[/green]" if row["burst_winner"] else "[dim]No[/dim]"
-        summary_table.add_row(
-            str(row["rank"]),
-            row["file_name"],
-            str(row["burst_id"]),
-            is_winner,
-            f"{row['focus_score']:.1f}",
-            f"{row['musiq_score']:.1f}",
-            f"{row['aesthetic_score']:.2f}",
-            f"{row['blown_pct']:.1f}%",
-            f"{row['composite_score']:.2f}",
+        group_bursts(
+            records,
+            time_window_seconds=config.time_window,
+            phash_threshold=config.phash_threshold,
+            sim_threshold=config.sim_threshold,
+            max_burst_duration_seconds=config.max_burst_duration,
+            profile=profile,
         )
+    winners = _assign_ranks(records)
+    audit.set_count("winners", len(winners))
 
-    console.print(summary_table)
-    console.print(f"[bold green]Report saved to:[/bold green] {csv_file}")
+    for record in records:
+        record["feedback_decision"] = feedback.get(record["file_path"], "")
+        record["portfolio_selected"] = False
 
-    winners_df = df[df["burst_winner"]].sort_values(by="composite_score", ascending=False)
-    num_winners = len(winners_df)
-    console.print(f"\n[cyan]Found {num_winners} unique selects out of {len(df)} total files.[/cyan]")
-
-    prompt_msg = (
-        f"Enter number of top images to copy into '{run_dir.name}/picks/' "
-        f"(1-{num_winners}, 'all', or press Enter to skip): "
+    _show_summary(winners)
+    requested_count = _selection_count(config.selection, len(winners), config)
+    candidate_pool = list(winners)
+    candidate_paths = {record["file_path"] for record in candidate_pool}
+    candidate_pool.extend(
+        record
+        for record in records
+        if feedback.get(record["file_path"]) == "keep"
+        and record["file_path"] not in candidate_paths
     )
-    user_input = console.input(f"[bold yellow]{prompt_msg}[/bold yellow]").strip().lower()
+    selected = select_portfolio_candidates(
+        candidate_pool,
+        requested_count,
+        diversity_strength=config.diversity,
+        feedback=feedback,
+    )
+    for order, record in enumerate(selected, start=1):
+        record["portfolio_selected"] = True
+        record["portfolio_selection_order"] = order
+    audit.set_count("selected", len(selected))
 
-    if not user_input:
-        console.print("[dim]Selection skipped. Original files remain untouched.[/dim]")
-        return
+    audit.set_phase("reporting")
+    evaluation_file = run_dir / "evaluation.csv"
+    atomic_write_csv(
+        evaluation_file,
+        REPORT_FIELDS,
+        (_report_row(record) for record in _global_quality_order(records)),
+    )
+    audit.add_output("evaluation", evaluation_file)
 
-    count_to_copy = num_winners if user_input == "all" else 0
-    if user_input != "all":
-        try:
-            count_to_copy = int(user_input)
-            if not 1 <= count_to_copy <= num_winners:
-                raise ValueError
-        except ValueError:
-            console.print("[red]Invalid entry. No files copied.[/red]")
-            return
+    feedback_template = run_dir / "feedback.csv"
+    write_feedback_template(
+        feedback_template,
+        _global_quality_order(records),
+        {record["file_path"] for record in selected},
+    )
+    audit.add_output("feedback", feedback_template)
 
-    picks_dir = run_dir / "picks"
-    picks_dir.mkdir(parents=True, exist_ok=False)
+    if config.contact_sheet_count > 0:
+        from image_loader import load_image
 
-    picks_to_copy = winners_df.head(count_to_copy)
-    console.print(f"\n[bold green]Copying top {len(picks_to_copy)} selects and companion files...[/bold green]")
-
-    lead_files = [Path(file_path) for file_path in picks_to_copy["file_path"]]
-    export_plan = build_export_plan(folder, lead_files)
-    copied_files_count = copy_export_plan(picks_dir, export_plan)
-
-    manifest_file = run_dir / "export_manifest.csv"
-    with manifest_file.open("w", newline="", encoding="utf-8") as manifest_handle:
-        writer = csv.DictWriter(
-            manifest_handle,
-            fieldnames=["source", "destination", "size_bytes"],
+        audit.set_phase("contact_sheet")
+        review_candidates = candidate_pool[: config.contact_sheet_count]
+        contact_sheet = run_dir / "review.html"
+        generated, thumbnail_failures = generate_contact_sheet(
+            contact_sheet,
+            review_candidates,
+            lambda path: load_image(path, max_dim=480).pil_image,
         )
-        writer.writeheader()
-        for item in export_plan:
-            writer.writerow({
+        for file_path, error in thumbnail_failures:
+            audit.record_failure(file_path, "contact_sheet", error)
+        audit.data["counts"]["contact_sheet_images"] = generated
+        audit.add_output("contact_sheet", contact_sheet)
+
+    if selected:
+        audit.set_phase("export")
+        picks_dir = run_dir / "picks"
+        picks_dir.mkdir(parents=True, exist_ok=False)
+        export_plan = build_export_plan(
+            folder,
+            (Path(record["file_path"]) for record in selected),
+        )
+        copied_count = copy_export_plan(picks_dir, export_plan)
+
+        xmp_outputs: list[Path] = []
+        if config.write_xmp:
+            rated_families: set[tuple[Path, str]] = set()
+            for rank, record in enumerate(selected, start=1):
+                exported_image = picks_dir / Path(record["file_path"]).relative_to(folder)
+                family_key = (exported_image.parent, logical_asset_stem(exported_image))
+                if family_key in rated_families:
+                    continue
+                rated_families.add(family_key)
+                try:
+                    xmp_outputs.append(
+                        write_xmp_rating(
+                            exported_image,
+                            rating_for_rank(rank, len(selected)),
+                        )
+                    )
+                except Exception as error:
+                    audit.record_failure(Path(record["file_path"]), "xmp", error)
+
+        copied_destinations = {
+            (picks_dir / item.relative_destination).resolve() for item in export_plan
+        }
+        resolved_xmp_outputs = {path.resolve() for path in xmp_outputs}
+        manifest_rows = [
+            {
                 "source": str(item.source),
                 "destination": str(picks_dir / item.relative_destination),
-                "size_bytes": item.source.stat().st_size,
-            })
+                "source_size_bytes": item.source.stat().st_size,
+                "destination_size_bytes": (picks_dir / item.relative_destination).stat().st_size,
+                "kind": (
+                    "copied_and_rated"
+                    if (picks_dir / item.relative_destination).resolve() in resolved_xmp_outputs
+                    else "copied"
+                ),
+            }
+            for item in export_plan
+        ]
+        manifest_rows.extend(
+            {
+                "source": "",
+                "destination": str(xmp_path),
+                "source_size_bytes": "",
+                "destination_size_bytes": xmp_path.stat().st_size,
+                "kind": "generated_xmp",
+            }
+            for xmp_path in xmp_outputs
+            if xmp_path.resolve() not in copied_destinations
+        )
+        audit.set_count(
+            "exported_files",
+            copied_count + sum(path.resolve() not in copied_destinations for path in xmp_outputs),
+        )
+        export_manifest = run_dir / "export_manifest.csv"
+        atomic_write_csv(
+            export_manifest,
+            (
+                "source",
+                "destination",
+                "source_size_bytes",
+                "destination_size_bytes",
+                "kind",
+            ),
+            manifest_rows,
+        )
+        audit.add_output("picks", picks_dir)
+        audit.add_output("export_manifest", export_manifest)
 
+        console.print(
+            Panel.fit(
+                f"Copied [bold green]{len(selected)}[/bold green] selections "
+                f"([cyan]{copied_count}[/cyan] files) to\n"
+                f"[bold cyan]{escape(str(picks_dir))}[/bold cyan]",
+                title="Export Finished",
+            )
+        )
+    else:
+        console.print(
+            "[dim]Selection skipped; reports and review artifacts were still created.[/dim]"
+        )
+
+    audit.finish("completed")
+    console.print(f"[bold green]Run report:[/bold green] {escape(str(evaluation_file))}")
+    return 0
+
+
+def _evaluate_pending(
+    pending_files: list[tuple[Path, FileFingerprint]],
+    metadata_by_path: dict[Path, CaptureMetadata],
+    runtime: Any,
+    profile: ScoringProfile,
+    config: PipelineConfig,
+    assumed_timezone: Any,
+    evaluation_cache: EvaluationCache | None,
+    cache_signature: str,
+    audit: RunAudit,
+) -> list[dict[str, Any]]:
+    from advanced_analysis import analyze_portrait
+
+    evaluated: list[dict[str, Any]] = []
+    completed_count = 0
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        disable=config.plain or not console.is_terminal,
+    )
+
+    with ThreadPoolExecutor(max_workers=config.workers) as executor, progress:
+        task = progress.add_task("[cyan]Evaluating photos...", total=len(pending_files))
+        batches = iter(_chunks(pending_files, config.batch_size))
+
+        def submit_batch(batch: list[tuple[Path, FileFingerprint]]) -> list[Any]:
+            return [
+                executor.submit(
+                    _prepare_image,
+                    file_path,
+                    fingerprint,
+                    metadata_by_path.get(file_path.resolve()),
+                    assumed_timezone,
+                )
+                for file_path, fingerprint in batch
+            ]
+
+        current_batch = next(batches)
+        current_futures = submit_batch(current_batch)
+        while True:
+            prepared: list[PreparedImage] = []
+            for (file_path, _), future in zip(current_batch, current_futures, strict=True):
+                try:
+                    prepared.append(future.result())
+                except Exception as error:
+                    audit.record_failure(file_path, "decode", error)
+                    _warning(f"Skipped {file_path}: {error}")
+                    progress.advance(task)
+
+            next_batch = next(batches, None)
+            next_futures = submit_batch(next_batch) if next_batch is not None else None
+
+            if profile.name == "portrait":
+                for item in prepared:
+                    try:
+                        portrait = analyze_portrait(item.loaded.cv_image)
+                        item.face_count = portrait.face_count
+                        item.eye_count = portrait.eye_count
+                        item.eye_factor = portrait.eye_factor
+                        item.eye_warning = portrait.warning
+                    except Exception as error:
+                        audit.record_failure(item.file_path, "portrait_analysis", error)
+                        _warning(f"Portrait analysis unavailable for {item.file_path}: {error}")
+
+            musiq_ready: list[PreparedImage] = []
+            for item in prepared:
+                try:
+                    item.musiq_score = runtime.infer_musiq(item.loaded.cv_image)
+                    musiq_ready.append(item)
+                except Exception as error:
+                    audit.record_failure(item.file_path, "musiq", error)
+                    _warning(f"Skipped {item.file_path}: {error}")
+                    progress.advance(task)
+
+            inference_results: list[Any] = []
+            if musiq_ready:
+                try:
+                    inference_results = runtime.infer_clip_batch(
+                        [item.loaded.pil_image for item in musiq_ready]
+                    )
+                except Exception:
+                    inference_results = []
+                    isolated_items: list[PreparedImage] = []
+                    for item in musiq_ready:
+                        try:
+                            inference_results.extend(
+                                runtime.infer_clip_batch([item.loaded.pil_image])
+                            )
+                            isolated_items.append(item)
+                        except Exception as error:
+                            audit.record_failure(item.file_path, "clip", error)
+                            _warning(f"Skipped {item.file_path}: {error}")
+                            progress.advance(task)
+                    musiq_ready = isolated_items
+
+            for item, inference in zip(musiq_ready, inference_results, strict=True):
+                metadata = item.loaded.metadata
+                record = {
+                    "file_name": item.file_path.name,
+                    "file_path": str(item.file_path.resolve()),
+                    "timestamp": metadata.capture_time,
+                    "timestamp_source": metadata.timestamp_source,
+                    "timezone_source": metadata.timezone_source,
+                    "camera_model": metadata.camera_model,
+                    "camera_serial": metadata.camera_serial,
+                    "sequence_number": metadata.sequence_number,
+                    "autofocus_info": metadata.autofocus_info,
+                    "phash": item.phash,
+                    "focus_score": item.focus_score,
+                    "musiq_score": item.musiq_score,
+                    "blown_pct": item.blown_pct,
+                    "crushed_pct": item.crushed_pct,
+                    "exposure_penalty": item.exposure_penalty,
+                    "aesthetic_score": inference.aesthetic_score,
+                    "embedding": inference.embedding,
+                    "subject_integrity": inference.subject_integrity,
+                    "face_count": item.face_count,
+                    "eye_count": item.eye_count,
+                    "eye_factor": item.eye_factor,
+                    "eye_warning": item.eye_warning,
+                    "cache_hit": False,
+                }
+                try:
+                    if FileFingerprint.from_path(item.file_path) != item.fingerprint:
+                        raise RuntimeError("File changed while it was being evaluated")
+                    if evaluation_cache is not None:
+                        evaluation_cache.put(
+                            item.file_path,
+                            item.fingerprint,
+                            cache_signature,
+                            record_to_cache(record),
+                        )
+                    evaluated.append(record)
+                    completed_count += 1
+                    progress.advance(task)
+                except Exception as error:
+                    audit.record_failure(item.file_path, "checkpoint", error)
+                    _warning(f"Skipped {item.file_path}: {error}")
+                    progress.advance(task)
+            audit.set_count("evaluated", completed_count)
+
+            if next_batch is None or next_futures is None:
+                break
+            current_batch = next_batch
+            current_futures = next_futures
+
+    return evaluated
+
+
+def _prepare_image(
+    file_path: Path,
+    fingerprint: FileFingerprint,
+    metadata: CaptureMetadata | None,
+    assumed_timezone: Any,
+) -> PreparedImage:
+    import imagehash
+
+    from image_loader import load_image
+
+    loaded = load_image(
+        file_path,
+        max_dim=MAX_IMAGE_DIMENSION,
+        metadata=metadata,
+        assumed_timezone=assumed_timezone,
+    )
+    focus_score = calculate_top_percentile_focus(loaded.cv_image)
+    blown_fraction, crushed_fraction, exposure_penalty = check_exposure_clipping(loaded.cv_image)
+    result = PreparedImage(
+        file_path=file_path,
+        fingerprint=fingerprint,
+        loaded=loaded,
+        focus_score=focus_score,
+        blown_pct=blown_fraction * 100.0,
+        crushed_pct=crushed_fraction * 100.0,
+        exposure_penalty=exposure_penalty,
+        phash=imagehash.phash(loaded.pil_image),
+    )
+    return result
+
+
+def _assign_ranks(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_burst: dict[int, list[dict[str, Any]]] = {}
+    for record in records:
+        by_burst.setdefault(int(record["burst_id"]), []).append(record)
+
+    for group in by_burst.values():
+        ordered = sorted(group, key=_quality_sort_key)
+        for burst_rank, record in enumerate(ordered, start=1):
+            record["burst_rank"] = burst_rank
+            record["burst_winner"] = burst_rank == 1
+
+    for global_rank, record in enumerate(_global_quality_order(records), start=1):
+        record["global_quality_rank"] = global_rank
+
+    winners = sorted(
+        (record for record in records if record["burst_winner"]),
+        key=_quality_sort_key,
+    )
+    for selection_rank, record in enumerate(winners, start=1):
+        record["selection_rank"] = selection_rank
+    for record in records:
+        record.setdefault("selection_rank", "")
+    return winners
+
+
+def _report_row(record: dict[str, Any]) -> dict[str, Any]:
+    capture_time = record["timestamp"]
+    row = dict(record)
+    row["timestamp"] = capture_time.isoformat()
+    row["timestamp_utc"] = capture_time.astimezone(UTC).isoformat()
+    return row
+
+
+def _show_environment(
+    config: PipelineConfig,
+    folder: Path,
+    output_root: Path,
+    device: str,
+    metadata_backend: str,
+    file_count: int,
+) -> None:
     console.print(
         Panel.fit(
-            f"Successfully copied [bold green]{len(picks_to_copy)}[/bold green] selects "
-            f"([cyan]{copied_files_count}[/cyan] total files including sidecars/companions) "
-            f"to:\n[bold cyan]{picks_dir.resolve()}[/bold cyan]\n"
-            f"Manifest: [cyan]{manifest_file}[/cyan]",
-            title="Export Finished",
+            f"[bold green]Compute:[/bold green] [cyan]{device.upper()}[/cyan]\n"
+            f"[bold green]Source:[/bold green] {escape(str(folder))}\n"
+            f"[bold green]Output:[/bold green] {escape(str(output_root))}\n"
+            f"[bold green]Images:[/bold green] {file_count} primary assets\n"
+            f"[bold green]Metadata:[/bold green] {metadata_backend}\n"
+            f"[bold green]Preset:[/bold green] {config.preset}\n"
+            f"[bold green]Burst grouping:[/bold green] {'off' if config.no_group else 'on'}",
+            title="Photo Cull",
         )
     )
+
+
+def _show_summary(winners: list[dict[str, Any]]) -> None:
+    table = Table(title="Top Selection Candidates", header_style="bold magenta")
+    for name, justification in (
+        ("Select", "center"),
+        ("Global", "center"),
+        ("Filename", "left"),
+        ("Burst", "center"),
+        ("Focus", "right"),
+        ("MUSIQ", "right"),
+        ("Aesthetic", "right"),
+        ("Composite", "right"),
+    ):
+        table.add_column(name, justify=justification)
+    for record in winners[:10]:
+        table.add_row(
+            str(record["selection_rank"]),
+            str(record["global_quality_rank"]),
+            escape(record["file_name"]),
+            str(record["burst_id"]),
+            f"{record['focus_score']:.1f}",
+            f"{record['musiq_score']:.1f}",
+            f"{record['aesthetic_score']:.2f}",
+            f"{record['composite_score']:.2f}",
+        )
+    console.print(table)
+    console.print(f"[cyan]Found {len(winners)} unique candidates.[/cyan]")
+
+
+def _selection_count(value: str | None, available: int, config: PipelineConfig) -> int:
+    if value is None and console.is_terminal and sys.stdin.isatty():
+        try:
+            value = console.input(
+                f"[bold yellow]Select how many to export (1-{available}, all, or Enter to skip): [/bold yellow]"
+            ).strip()
+        except EOFError:
+            value = "none"
+    elif value is None:
+        value = "none"
+        console.print("[dim]Non-interactive input detected; export skipped.[/dim]")
+
+    normalized = (value or "none").strip().casefold()
+    if normalized in {"", "none", "skip", "0"}:
+        return 0
+    if normalized == "all":
+        return available
+    try:
+        count = int(normalized)
+    except ValueError as error:
+        raise ValueError("--select must be a positive integer, 'all', or 'none'") from error
+    if not 1 <= count <= available:
+        raise ValueError(f"Selection count must be between 1 and {available}")
+    return count
+
+
+def _cache_signature(
+    config: PipelineConfig,
+    metadata_backend: str,
+    model_manifest: dict[str, str],
+) -> str:
+    return ";".join(
+        (
+            f"algorithm={EVALUATION_ALGORITHM_VERSION}",
+            f"clip={model_manifest['clip']}",
+            f"musiq={model_manifest['musiq']}",
+            f"musiq_sha256={model_manifest['musiq_sha256']}",
+            f"aesthetic={model_manifest['aesthetic_sha256']}",
+            f"metadata={metadata_backend}",
+            f"assumed_timezone={config.assumed_timezone or 'system'}",
+            f"max_dim={MAX_IMAGE_DIMENSION}",
+            f"preset={config.preset}",
+        )
+    )
+
+
+def _validate_config(config: PipelineConfig) -> None:
+    if config.time_window < 0:
+        raise ValueError("--burst-window cannot be negative")
+    if config.max_burst_duration < config.time_window:
+        raise ValueError("--max-burst-duration must be at least --burst-window")
+    if not 0.0 <= config.sim_threshold <= 1.0:
+        raise ValueError("--sim-threshold must be between 0 and 1")
+    if config.phash_threshold < 0:
+        raise ValueError("--phash-threshold cannot be negative")
+    if config.batch_size < 1 or config.workers < 1:
+        raise ValueError("--batch-size and --workers must be positive")
+    if not 0.0 <= config.diversity <= 1.0:
+        raise ValueError("--diversity must be between 0 and 1")
+    if config.contact_sheet_count < 0:
+        raise ValueError("--contact-sheet cannot be negative")
+    if config.aesthetic_head is not None and not config.aesthetic_head.expanduser().is_file():
+        raise ValueError(f"Aesthetic head does not exist: {config.aesthetic_head}")
+    if config.feedback_file is not None and not config.feedback_file.expanduser().is_file():
+        raise ValueError(f"Feedback file does not exist: {config.feedback_file}")
+
+
+def _chunks(items: list[Any], size: int) -> Iterable[list[Any]]:
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def _timestamp_order(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        records,
+        key=lambda record: (record["timestamp"], record["file_path"].casefold()),
+    )
+
+
+def _quality_sort_key(record: dict[str, Any]) -> tuple[float, str]:
+    return -float(record["composite_score"]), str(record["file_path"]).casefold()
+
+
+def _global_quality_order(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(records, key=_quality_sort_key)
+
+
+def _status(message: str, config: PipelineConfig):
+    if config.plain or not console.is_terminal:
+        console.print(message)
+        return nullcontext()
+    return console.status(f"[cyan]{message}...[/cyan]")
+
+
+def _warning(message: str) -> None:
+    console.log(f"[yellow]{escape(message)}[/yellow]")
+
+
+def _error(message: str) -> None:
+    console.print(f"[bold red]Error:[/bold red] {escape(message)}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="photo-cull",
+        description="Rank and review large photo collections using local models.",
+    )
+    parser.add_argument("folder", type=Path, help="Directory containing photos")
+    parser.add_argument(
+        "--output-dir", type=Path, help="Output root (default: <folder>/.photo-cull)"
+    )
+    parser.add_argument("--preset", choices=sorted(SCORING_PROFILES), default="balanced")
+    parser.add_argument(
+        "--primary",
+        choices=("raw", "jpeg", "all"),
+        default="raw",
+        help="Preferred file in RAW+JPEG pairs",
+    )
+    parser.add_argument("--burst-window", type=float, default=2.0)
+    parser.add_argument("--max-burst-duration", type=float, default=10.0)
+    parser.add_argument("--phash-threshold", type=int, default=8)
+    parser.add_argument("--sim-threshold", type=float, default=0.88)
+    parser.add_argument("--no-group", action="store_true")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
+    parser.add_argument("--no-mixed-precision", action="store_true")
+    parser.add_argument(
+        "--metadata-backend", choices=("auto", "exiftool", "pillow"), default="auto"
+    )
+    parser.add_argument(
+        "--assume-timezone", help="IANA timezone for EXIF timestamps without offsets"
+    )
+    parser.add_argument("--select", dest="selection", help="Positive count, 'all', or 'none'")
+    parser.add_argument(
+        "--diversity", type=float, default=0.0, help="Portfolio diversity strength from 0 to 1"
+    )
+    parser.add_argument(
+        "--feedback", type=Path, help="CSV containing file_path and keep/reject decision columns"
+    )
+    parser.add_argument(
+        "--contact-sheet", type=int, default=100, help="Maximum review thumbnails; 0 disables"
+    )
+    parser.add_argument(
+        "--write-xmp", action="store_true", help="Write ratings only beside exported copies"
+    )
+    parser.add_argument(
+        "--aesthetic-head", type=Path, help="Optional compatible personal aesthetic-head weights"
+    )
+    parser.add_argument("--plain", action="store_true", help="Disable animated progress")
+    parser.add_argument("--debug", action="store_true", help="Show exception tracebacks")
+    cache_group = parser.add_mutually_exclusive_group()
+    cache_group.add_argument("--no-cache", action="store_true")
+    cache_group.add_argument("--refresh-cache", action="store_true")
+    return parser
+
+
+def config_from_args(args: argparse.Namespace) -> PipelineConfig:
+    cache_mode = "none" if args.no_cache else "refresh" if args.refresh_cache else "use"
+    return PipelineConfig(
+        input_folder=args.folder,
+        output_folder=args.output_dir,
+        time_window=args.burst_window,
+        max_burst_duration=args.max_burst_duration,
+        phash_threshold=args.phash_threshold,
+        sim_threshold=args.sim_threshold,
+        no_group=args.no_group,
+        cache_mode=cache_mode,
+        metadata_backend=args.metadata_backend,
+        assumed_timezone=args.assume_timezone,
+        device=args.device,
+        batch_size=args.batch_size,
+        workers=args.workers,
+        mixed_precision=not args.no_mixed_precision,
+        preset=args.preset,
+        primary=args.primary,
+        selection=args.selection,
+        diversity=args.diversity,
+        feedback_file=args.feedback,
+        contact_sheet_count=args.contact_sheet,
+        write_xmp=args.write_xmp,
+        aesthetic_head=args.aesthetic_head,
+        plain=args.plain,
+        debug=args.debug,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    global console
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    console = Console(no_color=args.plain)
+    try:
+        return run_pipeline(config_from_args(args))
+    except (OSError, RuntimeError, ValueError) as error:
+        _error(str(error))
+        if args.debug:
+            raise
+        return 2
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate photos using local GPU acceleration.")
-    parser.add_argument("folder", type=str, help="Directory containing RAW or JPEG photos")
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        help="Output root (default: <folder>/.photo-cull); excluded from image discovery",
-    )
-    parser.add_argument("--burst-window", type=float, default=2.0, help="Maximum seconds between burst shots")
-    parser.add_argument("--sim-threshold", type=float, default=0.88, help="Cosine similarity threshold for burst frames")
-    parser.add_argument("--no-group", action="store_true", help="Disable burst grouping and rank all photos globally")
-    cache_group = parser.add_mutually_exclusive_group()
-    cache_group.add_argument(
-        "--no-cache",
-        action="store_true",
-        help="Do not read or write the persistent evaluation cache",
-    )
-    cache_group.add_argument(
-        "--refresh-cache",
-        action="store_true",
-        help="Re-evaluate every file and replace its cached metrics",
-    )
-    cli_args = parser.parse_args()
-
-    run_pipeline(
-        cli_args.folder,
-        cli_args.output_dir,
-        cli_args.burst_window,
-        cli_args.sim_threshold,
-        cli_args.no_group,
-        cli_args.no_cache,
-        cli_args.refresh_cache,
-    )
+    raise SystemExit(main())

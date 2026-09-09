@@ -1,6 +1,6 @@
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from file_ops import (
     ExportCollisionError,
@@ -9,6 +9,7 @@ from file_ops import (
     copy_export_plan,
     discover_image_files,
     find_associated_files,
+    select_primary_images,
 )
 
 
@@ -24,6 +25,13 @@ class FileOperationsTests(unittest.TestCase):
             output_root = root / "custom-output"
             output_root.mkdir()
             (output_root / "generated.jpg").touch()
+            target = root / "target.bin"
+            target.touch()
+            try:
+                (root / "linked.jpg").symlink_to(target)
+            except OSError:
+                # Creating symlinks may require elevated privileges on Windows.
+                pass
 
             discovered = discover_image_files(root, output_root)
 
@@ -83,6 +91,19 @@ class FileOperationsTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 copy_export_plan(picks, [ExportItem(source, Path("source.jpg"))])
             self.assertEqual(destination.read_bytes(), b"existing")
+
+    def test_primary_selection_prefers_raw_but_falls_back_to_jpeg(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            raw = root / "IMG_0001.ARW"
+            paired_jpeg = root / "IMG_0001.JPG"
+            jpeg_only = root / "IMG_0002.JPG"
+            for path in (raw, paired_jpeg, jpeg_only):
+                path.touch()
+
+            selected = select_primary_images([paired_jpeg, jpeg_only, raw], "raw")
+
+            self.assertEqual({path.name for path in selected}, {raw.name, jpeg_only.name})
 
     def test_plan_rejects_case_insensitive_destination_collisions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

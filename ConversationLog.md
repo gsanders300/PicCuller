@@ -36,3 +36,11 @@
   - Added the `--no-group` command-line switch to allow flat global rankings.
   - Fixed RAW EXIF timestamp extraction by parsing metadata from embedded JPEG thumbnails rather than relying on `file_path.stat().st_mtime`.
   - Formalized the TUI specifications to document the Rich console dashboard and interactive workflow.
+
+## Topic 8: Reliability, Performance, and Portfolio Workflow
+- Added collision-safe hierarchical export, output isolation, compound-sidecar handling, and export manifests.
+- Added resumable SQLite evaluation caching, atomic run manifests, per-file failure reports, and interruption status.
+- Added timezone-aware metadata with subsecond/offset support and optional bulk ExifTool extraction.
+- Added bounded decode concurrency, adaptive CLIP batching, CUDA mixed precision, and CPU fallback.
+- Separated global, burst, and selection ranks; bounded burst duration and camera identity.
+- Added genre presets, portfolio-diversity selection, contact-sheet feedback, exported XMP ratings, portrait eye warnings, subject-integrity prompts, compatible custom aesthetic heads, and ranking validation.
