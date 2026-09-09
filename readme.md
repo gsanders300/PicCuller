@@ -381,9 +381,14 @@ from a later export.
 Photo Cull applies EXIF orientation before it calculates a metric. It converts the
 image to RGB and limits the longest dimension to 1024 pixels.
 
-For JPEG files, Pillow requests a reduced decode when possible. For RAW files, `rawpy`
-first requests an embedded preview. If a preview is not available, `rawpy` uses a
-half-size demosaic with camera white balance.
+For JPEG files, Pillow requests a reduced decode when possible. The requested box keeps
+the image aspect ratio, because Pillow selects the reduction from whichever axis is most
+constrained. A square box measures the short side and selects one step less reduction,
+and on a 3:2 frame it can select no reduction at all.
+
+For RAW files, `rawpy` first requests an embedded preview. That preview is often full
+sensor resolution, so it receives the same reduced decode. If a preview is not available,
+`rawpy` uses a half-size demosaic with camera white balance.
 
 Photo Cull uses one decoded image for the pixel metrics and fallback metadata.
 
@@ -423,7 +428,9 @@ objective measure of artistic value.
 
 Photo Cull converts the preview to grayscale. It calculates one Laplacian image. It
 divides that image into a 16 by 16 grid. It uses the mean variance of the sharpest
-3 percent of the grid cells.
+3 percent of the grid cells. Cell variances come from a summed-area table, so the cost
+does not grow with the number of cells. Cells keep remainder pixels, so grid boundaries
+do not need to divide the image evenly.
 
 For a small image, Photo Cull uses the variance of the complete Laplacian image.
 
@@ -441,14 +448,25 @@ that burst.
 
 ### Exposure score
 
-Photo Cull measures the rendered 8-bit preview. It calculates the percentage of pixels
-at or above 254. It also calculates the percentage at or below 1.
+Photo Cull measures the rendered 8-bit preview per colour channel, not on a luminance
+conversion. A pixel counts as blown when any channel is at or above 254. A pixel counts
+as crushed only when every channel is at or below 1.
+
+Per-channel measurement matters. A clipped red at BGR (50, 100, 255) converts to mid
+grey, so a luminance measurement reported no clipping at all for a saturated sunset that
+had genuinely lost red detail. Requiring every channel for shadows is the matching rule:
+a single channel at zero is ordinary in a saturated colour and is not shadow clipping.
 
 The exposure factor starts at 1.0. Highlight clipping above 2 percent reduces the
 factor. Shadow clipping above 5 percent also reduces the factor. The highlight factor
 cannot be less than 0.4. The shadow factor cannot be less than 0.6.
 
 This metric does not measure recoverable RAW highlight or shadow data.
+
+The 2 percent and 5 percent thresholds are unchanged from the luminance measurement, and
+per-channel measurement reports more clipping for the same photograph. Treat both
+thresholds as uncalibrated, and validate them against your own keep and reject decisions
+before you trust the highlight penalty on saturated subjects.
 
 ### Neural scores
 
@@ -459,6 +477,11 @@ Photo Cull uses these model results:
 - A pinned LAION head gives the aesthetic score.
 - Genre prompts give a subject-integrity score for wildlife, portrait, and landscape.
 - OpenCV cascades give face and eye warnings for the portrait preset.
+
+An absent face detection is neutral. The cascade is frontal, so it misses profiles, hats,
+sunglasses, and backlit subjects; a photograph is not worse because the detector failed.
+Photo Cull still reports `No face detected` in `eye_warning`. A detected face with too few
+eyes does reduce the factor, because that is a statement about the photograph.
 
 The subject-integrity calculation compares one positive prompt with one negative
 prompt. The value is a heuristic probability. It is not an object detector.
@@ -486,7 +509,7 @@ bounded factors.
 | `balanced` | 0.50 | 1.0 | 1.5 | 1.0 | 1.0 | 0.0 | 0.0 |
 | `wildlife` | 0.55 | 0.8 | 1.8 | 1.0 | 0.8 | 0.0 | 0.2 |
 | `portrait` | 0.60 | 0.7 | 1.6 | 1.0 | 0.8 | 0.35 | 0.15 |
-| `landscape` | 0.45 | 1.2 | 1.2 | 1.1 | 1.2 | 0.0 | 0.0 |
+| `landscape` | 0.45 | 1.2 | 1.2 | 1.1 | 1.2 | 0.0 | 0.15 |
 
 The composite calculation is:
 
@@ -725,8 +748,8 @@ order. Numeric values keep full precision.
 | `eye_count` | Number of detected eyes for the portrait preset. |
 | `eye_factor` | Advisory portrait factor. |
 | `eye_warning` | Advisory portrait warning. |
-| `blown_pct` | Percentage of preview pixels at or above 254. |
-| `crushed_pct` | Percentage of preview pixels at or below 1. |
+| `blown_pct` | Percentage of preview pixels with any channel at or above 254. |
+| `crushed_pct` | Percentage of preview pixels with every channel at or below 1. |
 | `exposure_penalty` | Combined highlight and shadow factor. |
 | `composite_score` | Final score used for rank order. |
 | `feedback_decision` | Applied `keep` or `reject` decision. |
@@ -820,6 +843,11 @@ A cache lookup uses these values:
 A change to one of these values causes a new evaluation. Burst settings, selection
 count, diversity, feedback, contact-sheet count, and export settings do not invalidate
 the image metrics.
+
+The evaluation algorithm version is part of the identity, so a release that changes what
+a metric means invalidates every stored row. Version 5 does this: it changes JPEG draft
+scaling, measures exposure per channel, and gives the landscape preset a non-zero subject
+weight. A collection evaluated with an earlier version is evaluated once more.
 
 Use `--refresh-cache` after a change that the cache identity does not include. Use
 `--no-cache` for a temporary operation that must not use persistent evaluations.

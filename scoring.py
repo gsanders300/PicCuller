@@ -51,6 +51,10 @@ SCORING_PROFILES = {
         relative_focus_exponent=1.2,
         musiq_weight=1.1,
         exposure_weight=1.2,
+        # advanced_analysis.SUBJECT_PROMPTS defines landscape prompts, so the
+        # score was computed and reported at every run and then multiplied by a
+        # zero weight. Uncalibrated, like every other weight here.
+        subject_weight=0.15,
     ),
 }
 

@@ -55,7 +55,11 @@ def analyze_portrait(cv_image: Any) -> PortraitAnalysis:
 
     face_count = len(faces)
     if face_count == 0:
-        return PortraitAnalysis(0, 0, 0.85, "No face detected")
+        # A miss is a statement about the detector, not about the photograph.
+        # Frontal Haar cascades fail on profiles, hats, sunglasses, and backlight,
+        # so penalizing here marks down images that have nothing wrong with them.
+        # The warning still surfaces the absent detection.
+        return PortraitAnalysis(0, 0, 1.0, "No face detected")
     if eye_count < face_count * 2:
         return PortraitAnalysis(face_count, eye_count, 0.7, "Possible closed/obscured eyes")
     return PortraitAnalysis(face_count, eye_count, 1.0, "")

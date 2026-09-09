@@ -62,7 +62,10 @@ from xmp_rating import rating_for_rank, write_xmp_rating
 console = Console()
 
 MAX_IMAGE_DIMENSION = 1024
-EVALUATION_ALGORITHM_VERSION = "4"
+# 5: aspect-correct JPEG draft scaling (including RAW previews), per-channel
+# exposure clipping, summed-area tile variance, a neutral eye factor when no face
+# is detected, and a non-zero landscape subject weight.
+EVALUATION_ALGORITHM_VERSION = "5"
 REPORT_FIELDS = (
     "global_quality_rank",
     "selection_rank",
@@ -155,12 +158,27 @@ class PreparedImage:
     musiq_score: float = 0.0
 
 
+def _split_bounds(length: int, sections: int) -> Any:
+    """Tile boundaries matching numpy.array_split, which keeps remainder pixels."""
+    import numpy as np
+
+    base, remainder = divmod(length, sections)
+    sizes = np.full(sections, base, dtype=np.int64)
+    sizes[:remainder] += 1
+    return np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(sizes)))
+
+
 def calculate_top_percentile_focus(
     cv_image: Any,
     grid_size: int = 16,
     top_k_pct: float = 0.03,
 ) -> float:
-    """Calculate top-tile focus from one full-frame Laplacian operation."""
+    """Calculate top-tile focus from one full-frame Laplacian operation.
+
+    Tile variances come from a summed-area table rather than a Python loop over
+    256 array views. Boundaries match numpy.array_split, so uneven remainder
+    pixels stay in the same tiles.
+    """
     import cv2
     import numpy as np
 
@@ -170,22 +188,46 @@ def calculate_top_percentile_focus(
         return float(cv2.Laplacian(gray, cv2.CV_32F).var())
 
     laplacian = cv2.Laplacian(gray, cv2.CV_32F)
-    scores = [
-        float(patch.var())
-        for row in np.array_split(laplacian, grid_size, axis=0)
-        for patch in np.array_split(row, grid_size, axis=1)
-    ]
-    count = max(1, round(len(scores) * top_k_pct))
-    return float(np.mean(sorted(scores, reverse=True)[:count]))
+    # Accumulate in float64: the squared sums over a full frame overflow the
+    # useful precision of float32.
+    totals, squares = cv2.integral2(laplacian, sdepth=cv2.CV_64F, sqdepth=cv2.CV_64F)
+    rows = _split_bounds(height, grid_size)
+    columns = _split_bounds(width, grid_size)
+    top = rows[:-1][:, None]
+    bottom = rows[1:][:, None]
+    left = columns[:-1][None, :]
+    right = columns[1:][None, :]
+
+    counts = (bottom - top) * (right - left)
+    tile_sums = totals[bottom, right] - totals[top, right] - totals[bottom, left] + totals[top, left]
+    tile_squares = (
+        squares[bottom, right] - squares[top, right] - squares[bottom, left] + squares[top, left]
+    )
+    means = tile_sums / counts
+    # Clamp: catastrophic cancellation can drive an almost-flat tile below zero.
+    variances = np.maximum(tile_squares / counts - means * means, 0.0).ravel()
+
+    count = max(1, round(variances.size * top_k_pct))
+    return float(np.mean(np.sort(variances)[::-1][:count]))
 
 
 def check_exposure_clipping(cv_image: Any) -> tuple[float, float, float]:
-    import cv2
+    """Measure clipping per channel rather than on a luminance conversion.
+
+    A saturated channel loses detail even when the luminance average looks
+    healthy: a pixel at BGR (50, 100, 255) converts to mid grey, so a red sunset
+    that has genuinely clipped read as unclipped. Highlights count a pixel as
+    blown when any channel is saturated, which is the raw-converter convention.
+    Shadows require every channel to be crushed, because a single channel at
+    zero is ordinary in a saturated colour.
+    """
     import numpy as np
 
-    gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-    blown_fraction = float(np.mean(gray >= 254))
-    crushed_fraction = float(np.mean(gray <= 1))
+    channels = np.asarray(cv_image)
+    if channels.ndim == 2:
+        channels = channels[:, :, None]
+    blown_fraction = float(np.mean(np.any(channels >= 254, axis=2)))
+    crushed_fraction = float(np.mean(np.all(channels <= 1, axis=2)))
     highlight_penalty = max(0.4, 1.0 - 5.0 * max(0.0, blown_fraction - 0.02))
     shadow_penalty = max(0.6, 1.0 - 2.0 * max(0.0, crushed_fraction - 0.05))
     return blown_fraction, crushed_fraction, highlight_penalty * shadow_penalty

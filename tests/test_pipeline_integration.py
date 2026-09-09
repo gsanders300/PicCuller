@@ -255,6 +255,41 @@ class CacheHitPipelineTests(unittest.TestCase):
                     with self.subTest(path=Path(path).name, field=field):
                         self.assertEqual(first[field], second_rows[path][field])
 
+    def test_an_algorithm_version_bump_invalidates_the_cache(self) -> None:
+        """Changing metric meaning must force re-evaluation, not reuse old values."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+            config = build_config(source, output, cache_mode="use", selection="none")
+
+            run_with_mocks(config)
+            self.assertEqual(read_manifest(latest_run(output))["counts"]["cached"], 0)
+
+            # Same settings, same files, later algorithm version.
+            with patch.object(cull, "EVALUATION_ALGORITHM_VERSION", "999"):
+                run_with_mocks(config)
+
+            counts = read_manifest(latest_run(output))["counts"]
+            self.assertEqual(counts["cached"], 0)
+            self.assertEqual(counts["evaluated"], 2)
+
+    def test_the_algorithm_version_is_part_of_the_cache_identity(self) -> None:
+        config = build_config(Path("/photos"), Path("/out"))
+        signature = cull._cache_signature(
+            config,
+            "pillow",
+            {
+                "clip": "clip@rev",
+                "musiq": "musiq@rev",
+                "musiq_sha256": "aa",
+                "aesthetic_sha256": "bb",
+            },
+        )
+
+        self.assertIn(f"algorithm={cull.EVALUATION_ALGORITHM_VERSION}", signature)
+
     def test_a_changed_source_file_is_re_evaluated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()

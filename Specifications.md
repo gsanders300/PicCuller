@@ -33,9 +33,13 @@ otherwise the current system-local offset, and are labeled
 `system_local_assumption`. Missing or malformed capture time falls back to the
 timezone-aware filesystem modification time and is labeled `filesystem_mtime`.
 
-JPEG decoding uses Pillow draft scaling where available. EXIF orientation is applied
-before all metrics. RAW files use an embedded preview when possible and half-size
-demosaicing otherwise. Images are reduced to a maximum dimension of 1024 pixels.
+JPEG decoding uses Pillow draft scaling where available, with an aspect-correct box.
+Pillow selects the DCT scale from `min(width // box[0], height // box[1])`, so a square
+box measures the short side and yields one step less reduction than the longest-side
+target; on a 3:2 frame it selects none. Embedded RAW previews receive the same draft,
+because they are frequently full sensor resolution. EXIF orientation is applied before
+all metrics. RAW files use an embedded preview when possible and half-size demosaicing
+otherwise. Images are reduced to a maximum dimension of 1024 pixels.
 
 ## 3. Metrics and scoring
 
@@ -43,7 +47,10 @@ demosaicing otherwise. Images are reduced to a maximum dimension of 1024 pixels.
 
 The grayscale preview receives one Laplacian transform and is divided into a 16×16
 grid. Focus energy is the mean variance of the sharpest 3% of tiles. Remainder pixels
-are retained by array splitting.
+are retained by array splitting. Tile variances are read from a summed-area table, so
+cost is independent of tile count; tile boundaries match `numpy.array_split`, and
+variances are clamped at zero because cancellation can drive an almost-flat tile
+slightly negative.
 
 Because raw focus values depend on scene detail, each image receives an empirical
 session percentile `P_focus`. A preset-specific moderate absolute gate is:
@@ -56,14 +63,23 @@ Within a burst, `F_relative = Focus / max(Focus in burst)`.
 
 ### Exposure
 
-For 8-bit rendered luminance `Y`:
+Clipping is measured per channel on the 8-bit rendered preview, not on a luminance
+conversion. For channels `C`:
 
 ```text
-P_white = fraction(Y >= 254)
-P_black = fraction(Y <= 1)
+P_white = fraction(any C >= 254)
+P_black = fraction(all C <= 1)
 M_exposure = max(0.4, 1 - 5 × max(0, P_white - 0.02))
              × max(0.6, 1 - 2 × max(0, P_black - 0.05))
 ```
+
+Highlights use any channel because a saturated channel has lost detail regardless of
+luminance: BGR (50, 100, 255) converts to mid grey, so a luminance measurement reported
+no clipping for a sunset whose red channel was fully clipped. Shadows require every
+channel, because a single channel at zero is ordinary in a saturated colour.
+
+The 0.02 and 0.05 thresholds are carried over from the luminance measurement and are
+uncalibrated against per-channel fractions, which are larger for the same photograph.
 
 This describes preview clipping and is not a claim about recoverable RAW latitude.
 
@@ -72,8 +88,13 @@ This describes preview clipping and is not a claim about recoverable RAW latitud
 - MUSIQ supplies a no-reference technical-quality score normalized to `[0, 1]`.
 - Pinned CLIP ViT-L/14 embeddings feed the verified LAION aesthetic head.
 - Genre presets optionally compare normalized image embeddings with positive and
-  negative subject-integrity prompts.
+  negative subject-integrity prompts. Every preset defining prompts must also carry a
+  non-zero `subject_weight`; otherwise the run pays for the comparison and discards it.
 - Portrait mode uses OpenCV face/eye cascades to emit an advisory eye factor and warning.
+  An absent detection yields a neutral factor of 1.0 with a `No face detected` warning:
+  the frontal cascade misses profiles, hats, and backlight, so a miss describes the
+  detector rather than the photograph. A detected face with too few eyes does reduce the
+  factor.
 
 ### Composite
 

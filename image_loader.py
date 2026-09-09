@@ -32,7 +32,7 @@ def load_image(
 ) -> LoadedImage:
     """Decode pixels and fallback metadata in one pass."""
     if file_path.suffix.casefold() in RAW_EXTENSIONS:
-        pil_image, embedded_metadata = _load_raw_preview(file_path, assumed_timezone)
+        pil_image, embedded_metadata = _load_raw_preview(file_path, max_dim, assumed_timezone)
     else:
         pil_image, embedded_metadata = _load_standard_image(
             file_path,
@@ -54,6 +54,23 @@ def load_image(
     )
 
 
+def draft_box(size: tuple[int, int], max_dim: int) -> tuple[int, int]:
+    """Return an aspect-correct box for Image.draft.
+
+    Pillow chooses the JPEG DCT scale from whichever axis is most constrained,
+    `min(width // box[0], height // box[1])`. A square box therefore measures the
+    short side against `max_dim` and lands one power of two coarser than the
+    longest-side target the caller actually wants. On a 3:2 frame the square box
+    can select no reduction at all.
+    """
+    width, height = size
+    if width <= 0 or height <= 0:
+        return (max_dim, max_dim)
+    if width >= height:
+        return (max_dim, max(1, round(max_dim * height / width)))
+    return (max(1, round(max_dim * width / height)), max_dim)
+
+
 def _load_standard_image(
     file_path: Path,
     max_dim: int,
@@ -62,7 +79,7 @@ def _load_standard_image(
     with Image.open(file_path) as opened:
         capture_metadata = metadata_from_pillow(opened, file_path, assumed_timezone)
         if opened.format == "JPEG":
-            opened.draft("RGB", (max_dim, max_dim))
+            opened.draft("RGB", draft_box(opened.size, max_dim))
         opened.load()
         oriented = ImageOps.exif_transpose(opened)
         return oriented.convert("RGB"), capture_metadata
@@ -70,6 +87,7 @@ def _load_standard_image(
 
 def _load_raw_preview(
     file_path: Path,
+    max_dim: int,
     assumed_timezone: tzinfo | None,
 ) -> tuple[Image.Image, CaptureMetadata]:
     with rawpy.imread(str(file_path)) as raw:
@@ -82,6 +100,10 @@ def _load_raw_preview(
                         file_path,
                         assumed_timezone,
                     )
+                    # An embedded preview is often full sensor resolution, so it
+                    # benefits from the same draft. This must precede load(),
+                    # where draft becomes a silent no-op.
+                    opened.draft("RGB", draft_box(opened.size, max_dim))
                     opened.load()
                     oriented = ImageOps.exif_transpose(opened)
                     return oriented.convert("RGB"), capture_metadata

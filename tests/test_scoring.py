@@ -108,6 +108,32 @@ class ScoringTests(unittest.TestCase):
 
         self.assertLess(portrait, balanced)
 
+    def test_landscape_profile_uses_subject_integrity(self) -> None:
+        """Landscape defines CLIP prompts, so the score must reach the composite."""
+        intact = record("wide.jpg", 10.0)
+        intact["absolute_focus_factor"] = 1.0
+        intact["subject_integrity"] = 0.95
+        poor = dict(intact, subject_integrity=0.10)
+        landscape = get_scoring_profile("landscape")
+
+        self.assertLess(
+            calculate_composite_score(poor, profile=landscape),
+            calculate_composite_score(intact, profile=landscape),
+        )
+
+    def test_balanced_profile_ignores_subject_integrity(self) -> None:
+        """Balanced defines no prompts, so the value is a constant it must not use."""
+        intact = record("any.jpg", 10.0)
+        intact["absolute_focus_factor"] = 1.0
+        intact["subject_integrity"] = 0.95
+        poor = dict(intact, subject_integrity=0.10)
+        balanced = get_scoring_profile("balanced")
+
+        self.assertEqual(
+            calculate_composite_score(poor, profile=balanced),
+            calculate_composite_score(intact, profile=balanced),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
