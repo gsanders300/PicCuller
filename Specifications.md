@@ -16,7 +16,9 @@ directories are not followed. Discovery also excludes AppleDouble companions who
 begin with `._`, and operating-system directories that hold deleted or derived copies
 (`.Trashes`, `.Spotlight-V100`, `.fseventsd`, `.TemporaryItems`, `@eaDir`,
 `$RECYCLE.BIN`, `System Volume Information`, and `lost+found`). An unreadable directory
-is reported as a `discovery` failure rather than silently omitted.
+is reported as a `discovery` failure rather than silently omitted. If no readable
+supported image remains after a discovery error, the run is audited as failed and exits
+with code 1. A readable empty collection remains a successful no-op.
 
 ## 2. Metadata and ingestion
 
@@ -132,7 +134,9 @@ Image decoding and CPU metrics use a bounded thread pool. Each bounded group is 
 to CLIP as a mini-batch. CUDA inference uses automatic mixed precision by default.
 On an out-of-memory error, CLIP batches split recursively; a single-image OOM or an
 unsupported MPS operation moves all models to CPU and retries. MUSIQ remains per-image
-to avoid padding or distorting aspect ratios.
+to avoid padding or distorting aspect ratios. Preset refresh loads only the CLIP text
+tower. A supported accelerator failure during its initialization or cached-embedding
+scoring also retries on CPU.
 
 Same-stem RAW/JPEG pairs default to one RAW primary, avoiding duplicate inference while
 retaining all family files for export. `--primary jpeg` and `--primary all` override
@@ -198,20 +202,131 @@ time is not billed to ranking.
 
 ## 7. Terminal interface
 
-The Rich interface is scrollback-safe rather than full-screen:
+Photo Cull uses a streaming Rich interface. It does not use an alternate screen, mouse
+input, menus, or cursor navigation. Output remains in the terminal history.
 
-1. Scanning/model/metadata status indicators.
-2. Environment panel with device, paths, candidate count, backend, preset, and grouping.
-3. Evaluation progress with spinner, fraction, percentage, and ETA.
-4. Top-candidate table containing selection/global ranks and principal metrics.
-5. Interactive selection prompt only when stdin and the console are terminals.
-6. Export confirmation panel.
+### 7.1 Terminal modes
 
-`--plain` disables animation and color. `--select N|all|none` supports scripts and CI.
-Its format is validated with the other options before discovery, so a malformed value
-fails immediately rather than after a complete evaluation pass; the count is validated
-against the burst-winner total after ranking, when that total is known. EOF is treated as
-`none`, and Ctrl-C exits with code 130 after updating the run audit.
+Display mode and selection-input mode are independent.
+
+| Concern | Condition | Behavior |
+| --- | --- | --- |
+| Rich display | The console is a terminal and `--plain` is absent | Use color, animated phase status, and live evaluation progress |
+| Static display | `--plain` is set or the console is not a terminal | Use static phase messages and one durable progress line per evaluation batch |
+| Interactive selection | Standard input and the console are terminals, and `--select` is absent | Ask for an export count |
+| Non-interactive selection | `--select` is present or either stream is not a terminal | Use `--select`; request zero automatic selections when it is absent |
+
+For example, redirecting standard input while leaving output attached to a terminal keeps
+the Rich display but disables the prompt. `--plain` in a normal terminal disables Rich
+animation but does not disable the prompt.
+
+`--plain` changes presentation only. It does not change discovery, evaluation, ranking,
+selection, reporting, export, exit codes, or selection-input mode.
+
+### 7.2 Output sequence
+
+The interface presents information in this order:
+
+1. Validate arguments and configuration. A malformed `--select` value fails before
+   discovery and before a run directory exists.
+2. Show the source scan status. A readable collection with no supported images prints a
+   message and exits successfully without a run directory. A discovery error that leaves
+   no readable supported image creates a failed audit and exits with code 1 when the
+   output root is writable.
+3. Show the run-directory path immediately after the audit is created.
+4. Report cache reuse when cached evaluations exist.
+5. Show the environment panel. It contains the current compute mode, source path, output
+   root, primary-image count, metadata backend, preset, and burst-grouping state.
+6. Show metadata and model-loading status when those phases are necessary. Direct weight
+   downloads show the cache destination, percentage or byte count, and total size when
+   the server supplies it. Device and metadata fallbacks produce explanatory warnings.
+7. In Rich display mode, show evaluation progress with a spinner, bar,
+   completed and total counts, percentage, and estimated time remaining.
+   In static display mode, write one line per completed batch with processed and
+   successful counts, percentage, rate, and ETA.
+8. Show at most ten burst winners in the `Top Selection Candidates` table. The columns
+   are selection rank, global rank, filename, burst identifier, focus, MUSIQ, aesthetic,
+   and composite score. Show the complete winner count after the table.
+9. Write `evaluation.csv` before any interactive selection prompt. An interrupt or a bad
+   count at the prompt therefore does not discard completed metrics.
+10. Prompt for a count only in interactive selection mode.
+11. Generate the feedback and review artifacts. If the selection is empty, state that
+    export was skipped. Otherwise, show the selected-image count, copied-file count, and
+    `picks/` path after export completes.
+12. Show the `evaluation.csv` path when the run completes.
+
+Status animations must not erase prior warnings or results. Dynamic paths, filenames,
+and exception messages are escaped before Rich interprets markup. Terminal score values
+can be rounded for display; report values retain full precision.
+
+### 7.3 Selection input
+
+Selection input is case-insensitive and ignores surrounding space.
+
+| Input | Result |
+| --- | --- |
+| Enter, `none`, `skip`, or `0` | Request zero automatic selections; feedback keeps still apply |
+| `all` | Set the requested count to the burst-winner count; feedback still applies |
+| Integer from 1 through the winner count | Request that many selection slots |
+| Malformed explicit `--select` value | Fail during initial configuration validation |
+| Malformed interactive value | Show the error and prompt again |
+| Explicit integer larger than the winner count | Fail after ranking, when the available count is known |
+| Interactive integer larger than the winner count | Show the valid range and prompt again |
+
+Feedback keeps and rejects still apply after the count is read. Forced keeps can make the
+selection larger than the requested count. EOF at the interactive prompt is equivalent to
+`none`. A supplied `--select` value always bypasses the prompt.
+
+### 7.4 Warnings, errors, and interruption
+
+A recoverable per-image failure prints a warning, writes a `failures.csv` row, and lets
+other images continue. A fallback warning names the failed subsystem and the fallback.
+A fatal failure prints an `Error:` message and returns a nonzero exit code. Scripts must
+use the exit code and report files instead of parsing Rich formatting.
+
+After the run audit exists, Ctrl+C marks it `interrupted`, preserves completed cache
+records, cancels queued decode work, waits only for already-running decodes, and returns
+code 130. The completed evaluation report also survives an interrupt at the selection
+prompt. An interrupt during discovery returns code 130 without a traceback; discovery
+occurs before the audit exists, so it cannot update `run.json`.
+
+### 7.5 Current usability gaps
+
+These gaps are not part of the implemented interface contract:
+
+- Hugging Face controls the CLIP repository download display; it does not use Photo
+  Cull's line-oriented direct-weight reporter.
+- Ctrl+C cannot stop a decode that is already executing inside Pillow or LibRaw. It
+  cancels work that has not started and waits for the active worker calls.
+- Display modes, narrow width, literal markup, and discovery interruption have forced
+  console or mocked tests, but not operating-system-backed pseudo-terminal tests.
+
+Future terminal work must preserve non-interactive operation, the read-only source
+invariant, deterministic results, and the scrollback-safe design.
+
+### 7.6 Verification requirements
+
+Automated terminal-interface tests must cover these cases:
+
+1. `--help` and documented defaults agree with the parser.
+2. Rich display, plain display, redirected input, and redirected output select the
+   correct display and input modes.
+3. Plain output contains no ANSI color or cursor-control sequences and includes durable
+   per-batch evaluation progress.
+4. Explicit `--select` values never prompt. Missing `--select` never reads input in
+   non-interactive selection mode.
+5. Enter, aliases, `all`, valid counts, malformed values, out-of-range counts, repeated
+   prompts, and EOF have the results in section 7.3.
+6. Ctrl+C during evaluation and at the prompt returns 130, preserves completed cache
+   records, and records the final audit status.
+7. Recoverable warnings remain visible while later progress and results continue.
+8. Paths and filenames containing Rich markup characters display as literal text.
+9. Long paths, long filenames, Unicode text, and narrow terminals do not crash or hide
+   the final status and output path.
+
+Tests that require terminal detection or interruption timing must use pseudo-terminals or
+equivalent platform facilities. They must not use a real photo collection or download a
+model.
 
 ## 8. Portfolio review and feedback
 
@@ -246,7 +361,9 @@ recorded for reproducibility.
 Selections are planned completely before copying. The plan includes same-stem and
 compound sidecars, deduplicates families, preserves relative paths, detects
 case-insensitive collisions, rejects resolved sources outside the input root, and
-refuses existing destinations. Each copy is published through a temporary file.
+refuses an existing export directory. The complete export tree is copied into a private
+temporary directory. Photo Cull publishes that directory only after every copy succeeds,
+so a failed export does not expose a partial `picks/` tree.
 
 `export_manifest.csv` records source, destination, and size. `--write-xmp` creates or
 updates ratings only inside `picks/`, never in the source tree.

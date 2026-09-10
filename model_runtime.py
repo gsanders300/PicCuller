@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,12 @@ import requests
 import torch
 from platformdirs import user_cache_dir
 from torch import nn
-from transformers import CLIPModel, CLIPProcessor
+from transformers import (
+    CLIPModel,
+    CLIPProcessor,
+    CLIPTextModelWithProjection,
+    CLIPTokenizer,
+)
 
 from advanced_analysis import SUBJECT_PROMPTS, subject_integrity_scores
 from model_config import (
@@ -30,6 +36,8 @@ from model_config import (
     MUSIQ_WEIGHTS_URL,
     sha256_file,
 )
+
+DownloadProgress = Callable[[Path, int, int | None], None]
 
 
 class AestheticPredictor(nn.Module):
@@ -65,6 +73,7 @@ class ModelRuntime:
         preset: str,
         aesthetic_weights: Path | None = None,
         mixed_precision: bool = True,
+        download_progress: DownloadProgress | None = None,
     ) -> None:
         self.device = device
         self.mixed_precision = mixed_precision
@@ -84,11 +93,13 @@ class ModelRuntime:
         self.aesthetic_head, self.aesthetic_sha256 = load_aesthetic_head(
             device,
             aesthetic_weights,
+            download_progress,
         )
         musiq_weights = verified_cached_file(
             MUSIQ_WEIGHTS_ID,
             MUSIQ_WEIGHTS_URL,
             MUSIQ_WEIGHTS_SHA256,
+            download_progress,
         )
         self.musiq_sha256 = sha256_file(musiq_weights)
         self.musiq_metric = pyiqa.create_metric(
@@ -201,19 +212,18 @@ class SubjectScorer:
         prompts = SUBJECT_PROMPTS.get(preset)
         if prompts is None:
             raise ValueError(f"Preset {preset!r} defines no subject prompts")
-        model = (
-            CLIPModel.from_pretrained(CLIP_MODEL_ID, revision=CLIP_MODEL_REVISION)
-            .to(device)
-            .eval()
-        )
-        processor = CLIPProcessor.from_pretrained(
+        model = CLIPTextModelWithProjection.from_pretrained(
             CLIP_MODEL_ID,
             revision=CLIP_MODEL_REVISION,
-            use_fast=False,
         )
-        inputs = processor(text=list(prompts), return_tensors="pt", padding=True).to(device)
+        model.to(device).eval()
+        tokenizer = CLIPTokenizer.from_pretrained(
+            CLIP_MODEL_ID,
+            revision=CLIP_MODEL_REVISION,
+        )
+        inputs = tokenizer(text=list(prompts), return_tensors="pt", padding=True).to(device)
         with torch.inference_mode():
-            features = model.get_text_features(**inputs)
+            features = model(**inputs).text_embeds
             self.text_features = features / features.norm(p=2, dim=-1, keepdim=True)
 
     def score(self, embeddings: np.ndarray) -> list[float]:
@@ -257,6 +267,7 @@ def resolve_device(preference: str = "auto") -> torch.device:
 def load_aesthetic_head(
     device: torch.device,
     custom_weights: Path | None = None,
+    download_progress: DownloadProgress | None = None,
 ) -> tuple[nn.Module, str]:
     if custom_weights is not None:
         weights_path = custom_weights.expanduser().resolve(strict=True)
@@ -266,6 +277,7 @@ def load_aesthetic_head(
             AESTHETIC_WEIGHTS_NAME,
             AESTHETIC_WEIGHTS_URL,
             AESTHETIC_WEIGHTS_SHA256,
+            download_progress,
         )
         expected_hash = AESTHETIC_WEIGHTS_SHA256
 
@@ -282,7 +294,12 @@ def load_aesthetic_head(
     return model, actual_hash
 
 
-def verified_cached_file(name: str, url: str, expected_hash: str) -> Path:
+def verified_cached_file(
+    name: str,
+    url: str,
+    expected_hash: str,
+    download_progress: DownloadProgress | None = None,
+) -> Path:
     cache_directory = Path(user_cache_dir("photo-cull", "PhotoCull")) / "models"
     cache_directory.mkdir(parents=True, exist_ok=True)
     destination = cache_directory / name
@@ -292,30 +309,58 @@ def verified_cached_file(name: str, url: str, expected_hash: str) -> Path:
                 f"Model checksum mismatch at {destination}; remove the file and retry"
             )
     else:
-        _download_verified(url, destination, expected_hash)
+        _download_verified(url, destination, expected_hash, download_progress)
     return destination
 
 
-def _download_verified(url: str, destination: Path, expected_hash: str) -> None:
-    with requests.get(url, stream=True, timeout=(15, 120)) as response:
-        response.raise_for_status()
-        with tempfile.NamedTemporaryFile(
-            dir=destination.parent,
-            prefix=f".{destination.name}.",
-            suffix=".part",
-            delete=False,
-        ) as handle:
-            temporary_path = Path(handle.name)
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    handle.write(chunk)
+def _download_verified(
+    url: str,
+    destination: Path,
+    expected_hash: str,
+    download_progress: DownloadProgress | None = None,
+) -> None:
+    temporary_path: Path | None = None
     try:
+        with requests.get(url, stream=True, timeout=(15, 120)) as response:
+            response.raise_for_status()
+            content_length = response.headers.get("content-length")
+            try:
+                total_bytes = int(content_length) if content_length is not None else None
+            except ValueError:
+                total_bytes = None
+            if download_progress is not None:
+                download_progress(destination, 0, total_bytes)
+
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                suffix=".part",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                downloaded_bytes = 0
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+                        downloaded_bytes += len(chunk)
+                        if download_progress is not None:
+                            download_progress(destination, downloaded_bytes, total_bytes)
+                if download_progress is not None:
+                    download_progress(
+                        destination,
+                        downloaded_bytes,
+                        total_bytes if total_bytes is not None else downloaded_bytes,
+                    )
+
         if sha256_file(temporary_path) != expected_hash:
-            raise RuntimeError("Downloaded aesthetic model failed checksum verification")
+            raise RuntimeError(
+                f"Downloaded model {destination.name} failed checksum verification"
+            )
         temporary_path.replace(destination)
-    except Exception:
-        temporary_path.unlink(missing_ok=True)
-        raise
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _is_memory_error(error: RuntimeError) -> bool:

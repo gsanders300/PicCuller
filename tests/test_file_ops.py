@@ -1,6 +1,8 @@
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from file_ops import (
     ExportCollisionError,
@@ -152,6 +154,106 @@ class FileOperationsTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 copy_export_plan(picks, [ExportItem(source, Path("source.jpg"))])
             self.assertEqual(destination.read_bytes(), b"existing")
+
+    def test_export_validates_the_complete_destination_before_copying(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            first = root / "first.jpg"
+            second = root / "second.jpg"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            picks = root / "picks"
+            picks.mkdir()
+            (picks / "second.jpg").write_bytes(b"existing")
+
+            with self.assertRaises(FileExistsError):
+                copy_export_plan(
+                    picks,
+                    [
+                        ExportItem(first, Path("first.jpg")),
+                        ExportItem(second, Path("second.jpg")),
+                    ],
+                )
+
+            self.assertFalse((picks / "first.jpg").exists())
+            self.assertEqual((picks / "second.jpg").read_bytes(), b"existing")
+
+    def test_export_failure_removes_the_staged_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            first = root / "first.jpg"
+            second = root / "second.jpg"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            picks = root / "picks"
+
+            real_copy = shutil.copy2
+
+            def fail_second_copy(source: Path, destination: Path) -> None:
+                if Path(source) == second:
+                    raise OSError("copy failed")
+                real_copy(source, destination)
+
+            with (
+                patch("file_ops.shutil.copy2", side_effect=fail_second_copy),
+                self.assertRaisesRegex(OSError, "copy failed"),
+            ):
+                copy_export_plan(
+                    picks,
+                    [
+                        ExportItem(first, Path("first.jpg")),
+                        ExportItem(second, Path("second.jpg")),
+                    ],
+                )
+
+            self.assertFalse(picks.exists())
+            self.assertEqual(list(root.glob(".picks.*.part")), [])
+
+    def test_export_publishes_the_complete_staged_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "source.jpg"
+            source.write_bytes(b"source")
+            picks = root / "picks"
+
+            copied = copy_export_plan(
+                picks,
+                [ExportItem(source, Path("nested/source.jpg"))],
+            )
+
+            self.assertEqual(copied, 1)
+            self.assertEqual((picks / "nested/source.jpg").read_bytes(), b"source")
+            self.assertEqual(list(root.glob(".picks.*.part")), [])
+
+    def test_export_does_not_overwrite_a_destination_created_during_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "source.jpg"
+            source.write_bytes(b"source")
+            picks = root / "picks"
+            real_rename = Path.rename
+
+            def create_destination_before_publish(staging: Path, destination: Path) -> Path:
+                destination.mkdir()
+                (destination / "source.jpg").write_bytes(b"existing")
+                return real_rename(staging, destination)
+
+            with (
+                patch.object(
+                    Path,
+                    "rename",
+                    autospec=True,
+                    side_effect=create_destination_before_publish,
+                ),
+                self.assertRaises(FileExistsError),
+            ):
+                copy_export_plan(
+                    picks,
+                    [ExportItem(source, Path("source.jpg"))],
+                )
+
+            self.assertEqual((picks / "source.jpg").read_bytes(), b"existing")
+            self.assertEqual(list(root.glob(".picks.*.part")), [])
 
     def test_primary_selection_prefers_raw_but_falls_back_to_jpeg(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

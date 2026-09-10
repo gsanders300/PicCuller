@@ -1,4 +1,5 @@
 import csv
+import io
 import json
 import sqlite3
 import tempfile
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
+from rich.console import Console
 
 import cull
 from evaluation_cache import EvaluationCache
@@ -103,6 +105,60 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 
 
 class PipelineIntegrationTests(unittest.TestCase):
+    def test_discovery_interrupt_returns_130_without_a_traceback_or_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            source.mkdir()
+            stream = io.StringIO()
+            test_console = Console(file=stream, force_terminal=False, no_color=True)
+
+            with (
+                patch.object(cull, "console", test_console),
+                patch.object(cull, "discover_image_files", side_effect=KeyboardInterrupt),
+            ):
+                exit_code = cull.run_pipeline(build_config(source, output))
+
+            self.assertEqual(exit_code, 130)
+            self.assertFalse(output.exists())
+            self.assertIn("Interrupted during discovery", stream.getvalue())
+            self.assertNotIn("Traceback", stream.getvalue())
+
+    def test_an_empty_readable_collection_returns_success_without_an_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            source.mkdir()
+
+            exit_code = cull.run_pipeline(build_config(source, output))
+
+            self.assertEqual(exit_code, 0)
+            self.assertFalse(output.exists())
+
+    def test_discovery_failure_without_images_is_audited_and_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            source.mkdir()
+
+            def fail_discovery(_folder, _output_root, on_error):
+                on_error(PermissionError(13, "Permission denied", str(source)))
+                return []
+
+            with patch.object(cull, "discover_image_files", fail_discovery):
+                exit_code = cull.run_pipeline(build_config(source, output))
+
+            run_dir = latest_run(output)
+            manifest = read_manifest(run_dir)
+            failures = read_rows(run_dir / "failures.csv")
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(manifest["status"], "failed")
+            self.assertEqual(manifest["counts"]["discovered"], 0)
+            self.assertEqual([row["stage"] for row in failures], ["discovery"])
+
     def test_noninteractive_run_creates_audited_review_and_safe_export(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()
@@ -132,6 +188,39 @@ class PipelineIntegrationTests(unittest.TestCase):
             self.assertTrue((run_dir / "picks/day-two/same.xmp").is_file())
             export_manifest = (run_dir / "export_manifest.csv").read_text(encoding="utf-8")
             self.assertIn("generated_xmp", export_manifest)
+
+    def test_plain_run_prints_durable_progress_and_the_run_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+            stream = io.StringIO()
+            test_console = Console(
+                file=stream,
+                force_terminal=False,
+                no_color=True,
+                width=50,
+            )
+            config = build_config(
+                source,
+                output,
+                selection="none",
+                contact_sheet_count=0,
+                write_xmp=False,
+                plain=True,
+            )
+
+            with patch.object(cull, "console", test_console):
+                exit_code = run_with_mocks(config)
+
+            rendered = stream.getvalue()
+            self.assertEqual(exit_code, 0)
+            self.assertIn("Run directory:", rendered)
+            self.assertIn("Evaluation: 2/2 processed (100%)", rendered)
+            self.assertIn("2 successful", rendered)
+            self.assertNotIn("\x1b", rendered)
+            self.assertLess(rendered.index("Run directory:"), rendered.index("Evaluation:"))
 
 
 class StageInstrumentationTests(unittest.TestCase):
@@ -479,6 +568,71 @@ class PresetSwitchTests(unittest.TestCase):
             self.assertEqual(counts["evaluated"], 0)
             self.assertEqual(counts["preset_refreshed"], 2)
             self.assertTrue(all(row["subject_integrity"] == "0.75" for row in rows))
+
+    def test_prompted_preset_refresh_retries_device_failures_on_cpu(self) -> None:
+        def subject_scorer_type(failure_point, devices_seen):
+            class FailingAcceleratorSubjectScorer:
+                def __init__(self, device, _preset):
+                    self.device = device
+                    devices_seen.append(device.type)
+                    if failure_point == "initialization" and device.type == "mps":
+                        raise RuntimeError("MPS operation is not implemented")
+
+                def score(self, embeddings):
+                    if failure_point == "score" and self.device.type == "mps":
+                        raise RuntimeError("MPS operation is not implemented")
+                    return [0.75] * len(embeddings)
+
+            return FailingAcceleratorSubjectScorer
+
+        for failure_point in ("initialization", "score"):
+            with (
+                self.subTest(failure_point=failure_point),
+                tempfile.TemporaryDirectory() as temporary_directory,
+            ):
+                root = Path(temporary_directory).resolve()
+                source = root / "photos"
+                output = root / "output"
+                make_photos(source)
+                run_with_mocks(
+                    build_config(
+                        source,
+                        output,
+                        cache_mode="use",
+                        selection="none",
+                        preset="balanced",
+                    )
+                )
+
+                devices_seen = []
+                scorer_type = subject_scorer_type(failure_point, devices_seen)
+
+                def resolve_device(preference):
+                    return SimpleNamespace(type="cpu" if preference == "cpu" else "mps")
+
+                landscape = build_config(
+                    source,
+                    output,
+                    cache_mode="use",
+                    selection="none",
+                    preset="landscape",
+                    device="auto",
+                )
+                with (
+                    patch("model_runtime.SubjectScorer", scorer_type),
+                    patch("model_runtime.resolve_device", side_effect=resolve_device),
+                    patch.object(cull, "_show_environment") as show_environment,
+                ):
+                    exit_code = cull.run_pipeline(landscape)
+
+                run_dir = latest_run(output)
+                manifest = read_manifest(run_dir)
+                failures = read_rows(run_dir / "failures.csv")
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(devices_seen, ["mps", "cpu"])
+                self.assertEqual(manifest["environment"]["resolved_device"], "cpu")
+                self.assertIn("model_device_fallback", {row["stage"] for row in failures})
+                self.assertEqual(show_environment.call_args.args[3], "cpu")
 
     def test_the_refreshed_preset_is_cached_for_the_next_run(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

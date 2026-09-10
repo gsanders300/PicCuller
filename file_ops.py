@@ -230,35 +230,64 @@ def select_primary_images(image_files: Iterable[Path], preference: str) -> list[
 
 
 def copy_export_plan(picks_dir: Path, export_items: Iterable[ExportItem]) -> int:
-    """Copy a plan without overwriting existing files; publish each file atomically."""
+    """Copy and atomically publish a complete export without overwriting it."""
     export_items = list(export_items)
+    if picks_dir.exists() or picks_dir.is_symlink():
+        raise FileExistsError(f"Refusing to overwrite export directory: {picks_dir}")
+
+    destination_keys: set[str] = set()
+    for item in export_items:
+        relative_destination = item.relative_destination
+        if relative_destination.is_absolute() or ".." in relative_destination.parts:
+            raise ValueError(f"Export destination must be relative: {relative_destination}")
+        destination_key = relative_destination.as_posix().casefold()
+        if destination_key in destination_keys:
+            raise ExportCollisionError(
+                f"Export plan contains a destination collision at '{relative_destination}'"
+            )
+        destination_keys.add(destination_key)
+        if item.source.is_symlink() or not item.source.is_file():
+            raise ValueError(
+                f"Export source must be a regular non-symbolic-link file: {item.source}"
+            )
+
     required_bytes = sum(item.source.stat().st_size for item in export_items)
     free_bytes = shutil.disk_usage(picks_dir.parent).free
     if required_bytes > free_bytes:
         raise OSError(f"Export needs {required_bytes} bytes but only {free_bytes} bytes are free")
 
-    copied_count = 0
-    for item in export_items:
-        destination = picks_dir / item.relative_destination
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            raise FileExistsError(f"Refusing to overwrite export file: {destination}")
-
-        descriptor, temporary_name = tempfile.mkstemp(
-            dir=destination.parent,
-            prefix=f".{destination.name}.",
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            dir=picks_dir.parent,
+            prefix=f".{picks_dir.name}.",
             suffix=".part",
         )
-        os.close(descriptor)
-        temporary_path = Path(temporary_name)
-        try:
+    )
+    try:
+        for item in export_items:
+            destination = staging_dir / item.relative_destination
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                suffix=".part",
+            )
+            os.close(descriptor)
+            temporary_path = Path(temporary_name)
             shutil.copy2(item.source, temporary_path)
-            if destination.exists():
-                raise FileExistsError(f"Refusing to overwrite export file: {destination}")
             temporary_path.replace(destination)
-        except Exception:
-            temporary_path.unlink(missing_ok=True)
+        if picks_dir.exists() or picks_dir.is_symlink():
+            raise FileExistsError(f"Refusing to overwrite export directory: {picks_dir}")
+        try:
+            staging_dir.rename(picks_dir)
+        except OSError as error:
+            if picks_dir.exists() or picks_dir.is_symlink():
+                raise FileExistsError(
+                    f"Refusing to overwrite export directory: {picks_dir}"
+                ) from error
             raise
-        copied_count += 1
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
 
-    return copied_count
+    return len(export_items)

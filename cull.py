@@ -7,9 +7,9 @@ import hashlib
 import os
 import sys
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -348,12 +348,18 @@ def run_pipeline(config: PipelineConfig) -> int:
     # Discovery runs before the audit directory exists, so unreadable directories
     # are collected here and recorded as soon as the audit is available.
     discovery_errors: list[OSError] = []
-    with _status("Scanning source files", config):
-        discovered = discover_image_files(folder, output_root, discovery_errors.append)
-        all_files = select_primary_images(discovered, config.primary)
+    try:
+        with _status("Scanning source files", config):
+            discovered = discover_image_files(folder, output_root, discovery_errors.append)
+            all_files = select_primary_images(discovered, config.primary)
+    except KeyboardInterrupt:
+        console.print(
+            "\n[yellow]Interrupted during discovery. No run directory was created.[/yellow]"
+        )
+        return 130
     for error in discovery_errors:
         _warning(f"Could not read {getattr(error, 'filename', None) or 'a directory'}: {error}")
-    if not all_files:
+    if not all_files and not discovery_errors:
         console.print("[yellow]No supported images found.[/yellow]")
         return 0
 
@@ -381,13 +387,20 @@ def run_pipeline(config: PipelineConfig) -> int:
         models=model_manifest,
         discovered_count=len(discovered),
     )
+    console.print(f"[bold green]Run directory:[/bold green] {escape(str(run_dir))}")
     audit.data["counts"]["primary_candidates"] = len(all_files)
+    if discovery_errors:
+        audit.set_phase("discovery")
     for error in discovery_errors:
         audit.record_failure(
             Path(error.filename) if getattr(error, "filename", None) else None,
             "discovery",
             error,
         )
+    if not all_files:
+        audit.finish("failed")
+        _error("Discovery failed; no readable supported images were found")
+        return 1
 
     try:
         return _execute_pipeline(
@@ -485,12 +498,12 @@ def _execute_pipeline(
             console.print(f"[green]Reused {len(records)} cached evaluations.[/green]")
 
         if not pending_files:
-            audit.data["environment"]["resolved_device"] = "cache-only"
+            audit.data["environment"].setdefault("resolved_device", "cache-only")
             _show_environment(
                 config,
                 folder,
                 output_root,
-                "cache-only",
+                str(audit.data["environment"]["resolved_device"]),
                 metadata_backend,
                 len(all_files),
             )
@@ -537,6 +550,7 @@ def _execute_pipeline(
                         preset=config.preset,
                         aesthetic_weights=config.aesthetic_head,
                         mixed_precision=config.mixed_precision,
+                        download_progress=_model_download_reporter(),
                     )
             except RuntimeError as error:
                 if (
@@ -553,6 +567,7 @@ def _execute_pipeline(
                     preset=config.preset,
                     aesthetic_weights=config.aesthetic_head,
                     mixed_precision=False,
+                    download_progress=_model_download_reporter(),
                 )
             audit.data["models"]["aesthetic_sha256"] = runtime.aesthetic_sha256
             audit.data["models"]["musiq_sha256"] = runtime.musiq_sha256
@@ -687,7 +702,6 @@ def _execute_pipeline(
     if selected:
         audit.set_phase("export")
         picks_dir = run_dir / "picks"
-        picks_dir.mkdir(parents=True, exist_ok=False)
         export_plan = build_export_plan(
             folder,
             (Path(record["file_path"]) for record in selected),
@@ -807,13 +821,24 @@ def _refresh_preset_scores(
     else:
         import numpy as np
 
-        from model_runtime import SubjectScorer, resolve_device
+        from model_runtime import SubjectScorer, is_device_fallback_error, resolve_device
 
         device = resolve_device(config.device)
-        with _status(f"Scoring the {profile.name} preset from cached embeddings", config):
-            scorer = SubjectScorer(device, profile.name)
-            embeddings = np.stack([record["embedding"] for _, record in restored])
-            scores = scorer.score(embeddings)
+        embeddings = np.stack([record["embedding"] for _, record in restored])
+        try:
+            with _status(f"Scoring the {profile.name} preset from cached embeddings", config):
+                scorer = SubjectScorer(device, profile.name)
+                scores = scorer.score(embeddings)
+        except RuntimeError as error:
+            if device.type == "cpu" or not is_device_fallback_error(error):
+                raise
+            audit.record_failure(None, "model_device_fallback", error)
+            _warning(f"{device.type.upper()} preset scoring failed; retrying on CPU: {error}")
+            device = resolve_device("cpu")
+            with _status(f"Retrying the {profile.name} preset on CPU", config):
+                scorer = SubjectScorer(device, profile.name)
+                scores = scorer.score(embeddings)
+        audit.data["environment"]["resolved_device"] = device.type
 
     for (file_path, record), score in zip(restored, scores, strict=True):
         record["subject_integrity"] = float(score)
@@ -853,6 +878,9 @@ def _evaluate_pending(
 
     evaluated: list[dict[str, Any]] = []
     completed_count = 0
+    processed_count = 0
+    evaluation_started = perf_counter()
+    static_progress = config.plain or not console.is_terminal
     progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -864,7 +892,7 @@ def _evaluate_pending(
         disable=config.plain or not console.is_terminal,
     )
 
-    with ThreadPoolExecutor(max_workers=config.workers) as executor, progress:
+    with _decode_executor(config.workers) as executor, progress:
         task = progress.add_task("[cyan]Evaluating photos...", total=len(pending_files))
         batches = iter(_chunks(pending_files, config.batch_size))
 
@@ -1013,6 +1041,14 @@ def _evaluate_pending(
                 completed_count += 1
                 progress.advance(task)
             audit.set_count("evaluated", completed_count)
+            processed_count += len(current_batch)
+            if static_progress:
+                _show_static_evaluation_progress(
+                    processed_count,
+                    len(pending_files),
+                    completed_count,
+                    perf_counter() - evaluation_started,
+                )
 
             if next_batch is None or next_futures is None:
                 break
@@ -1217,18 +1253,34 @@ def _write_evaluation_csv(destination: Path, records: list[dict[str, Any]]) -> N
 
 
 def _selection_count(value: str | None, available: int) -> int:
-    if value is None and console.is_terminal and sys.stdin.isatty():
-        try:
-            value = console.input(
-                f"[bold yellow]Select how many to export (1-{available}, all, or Enter to skip): [/bold yellow]"
-            ).strip()
-        except EOFError:
-            value = "none"
-    elif value is None:
-        value = "none"
-        console.print("[dim]Non-interactive input detected; export skipped.[/dim]")
+    if value is not None:
+        return _parse_selection_count(value, available)
 
-    normalized = (value or "none").strip().casefold()
+    if console.is_terminal and sys.stdin.isatty():
+        prompt = (
+            f"[bold yellow]Automatic selections (1-{available}, all, or Enter for none; "
+            "feedback keeps still apply): [/bold yellow]"
+        )
+        while True:
+            try:
+                entered = console.input(prompt).strip()
+            except EOFError:
+                return 0
+            try:
+                return _parse_selection_count(entered, available)
+            except ValueError as error:
+                _warning(f"{error}. Try again.")
+
+    console.print(
+        "[dim]Non-interactive input detected; requesting zero automatic selections. "
+        "Feedback keeps still apply.[/dim]"
+    )
+    return 0
+
+
+def _parse_selection_count(value: str, available: int) -> int:
+    """Convert one explicit or interactive selection value to a count."""
+    normalized = value.strip().casefold()
     if normalized in {"", "none", "skip", "0"}:
         return 0
     if normalized == "all":
@@ -1307,6 +1359,86 @@ def _chunks(items: list[Any], size: int) -> Iterable[list[Any]]:
         yield items[start : start + size]
 
 
+@contextmanager
+def _decode_executor(max_workers: int) -> Iterator[ThreadPoolExecutor]:
+    """Cancel queued decodes before propagating an interrupt or fatal error."""
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        yield executor
+    except BaseException:
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+
+
+def _show_static_evaluation_progress(
+    processed: int,
+    total: int,
+    successful: int,
+    elapsed_seconds: float,
+) -> None:
+    """Write one durable progress line for plain and redirected output."""
+    elapsed_seconds = max(elapsed_seconds, 1e-9)
+    rate = processed / elapsed_seconds
+    remaining_seconds = max(0, total - processed) / rate
+    percent = 100.0 * processed / total
+    console.print(
+        f"Evaluation: {processed}/{total} processed ({percent:.0f}%); "
+        f"{successful} successful; {rate:.1f} images/s; "
+        f"ETA {_format_duration(remaining_seconds)}"
+    )
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, round(seconds))
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _model_download_reporter() -> Callable[[Path, int, int | None], None]:
+    """Return a throttled, line-oriented reporter for direct model downloads."""
+    reported_markers: dict[Path, int] = {}
+
+    def report(destination: Path, downloaded_bytes: int, total_bytes: int | None) -> None:
+        if total_bytes is not None and total_bytes > 0:
+            marker = min(10, downloaded_bytes * 10 // total_bytes)
+            if reported_markers.get(destination) == marker:
+                return
+            reported_markers[destination] = marker
+            percent = marker * 10
+            detail = f"{_format_bytes(downloaded_bytes)} of {_format_bytes(total_bytes)}"
+            console.print(
+                f"[cyan]Downloading {escape(str(destination))}:[/cyan] {percent}% ({detail})"
+            )
+            return
+
+        marker = downloaded_bytes // (64 * 1024 * 1024)
+        if reported_markers.get(destination) == marker:
+            return
+        reported_markers[destination] = marker
+        console.print(
+            f"[cyan]Downloading {escape(str(destination))}:[/cyan] "
+            f"{_format_bytes(downloaded_bytes)}"
+        )
+
+    return report
+
+
+def _format_bytes(count: int) -> str:
+    value = float(count)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024.0 or unit == "GiB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024.0
+    raise AssertionError("unreachable")
+
+
 def _timestamp_order(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         records,
@@ -1368,7 +1500,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--assume-timezone", help="IANA timezone for EXIF timestamps without offsets"
     )
-    parser.add_argument("--select", dest="selection", help="Positive count, 'all', or 'none'")
+    parser.add_argument(
+        "--select",
+        dest="selection",
+        help="Automatic selection count, 'all', or 'none'; feedback keeps still apply",
+    )
     parser.add_argument(
         "--diversity", type=float, default=0.0, help="Portfolio diversity strength from 0 to 1"
     )
@@ -1384,7 +1520,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--aesthetic-head", type=Path, help="Optional compatible personal aesthetic-head weights"
     )
-    parser.add_argument("--plain", action="store_true", help="Disable animated progress")
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Use static output without color or animated progress",
+    )
     parser.add_argument("--debug", action="store_true", help="Show exception tracebacks")
     cache_group = parser.add_mutually_exclusive_group()
     cache_group.add_argument("--no-cache", action="store_true")

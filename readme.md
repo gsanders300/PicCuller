@@ -56,7 +56,8 @@ Photo Cull gives these protections:
 - It checks destination names without regard to letter case.
 - It does not overwrite an export file.
 - It checks available disk space before an export.
-- It uses a temporary file for each copy.
+- It stages the complete export in a temporary directory.
+- It publishes the export directory only after all copies succeed.
 - It uses atomic writes for CSV, JSON, HTML, and XMP files.
 
 ## Terms
@@ -140,10 +141,13 @@ Photo Cull scans the source directory. The program then shows the ten highest-ra
 burst winners.
 
 If the terminal is interactive, the program asks for the number of images to export.
-Press Enter to skip the export. Enter a positive integer or `all` to start the export.
+Press Enter to request zero automatic selections. You can also enter `none`, `skip`, or
+`0`. Enter a positive integer or `all` to start the export. A `keep` decision in a
+feedback file can still force an export when the requested count is zero.
 
-If the terminal is not interactive, the program skips the export by default. Use
-`--select` for a script or a continuous-integration job.
+If the terminal is not interactive, the program requests zero automatic selections by
+default. Feedback keeps still apply. Use `--select` for a script or a
+continuous-integration job.
 
 The default output root is:
 
@@ -156,6 +160,8 @@ Each operation creates a directory with this form:
 ~~~text
 .photo-cull/run_YYYYMMDD_HHMMSS_microseconds/
 ~~~
+
+Photo Cull prints the exact run-directory path when it creates the audit.
 
 Use this command to show the current option list:
 
@@ -290,8 +296,9 @@ for that operation. Photo Cull does not cache the new evaluations from that fall
 | `--write-xmp` | Off | Write XMP ratings beside exported copies. |
 | `--aesthetic-head PATH` | Pinned default head | Use compatible personal aesthetic-head weights. |
 
-The value `all` selects all eligible burst winners. Forced keeps can add non-winners.
-If the number of forced keeps is larger than `N`, Photo Cull selects all forced keeps.
+The value `all` sets the requested count to the number of burst winners. Feedback still
+applies. Forced keeps can add non-winners. If the number of forced keeps is larger than
+`N`, Photo Cull selects all forced keeps.
 
 A diversity value of zero uses score order. A value of one gives maximum weight to
 novelty in CLIP space. High values can select a lower-quality image.
@@ -359,7 +366,10 @@ image extension but no image data. The operating-system directories hold deleted
 derived copies, which must not be culled as if they were originals.
 
 Photo Cull does not silently skip a directory it cannot read. Each unreadable directory
-produces a warning and a `discovery` row in `failures.csv`.
+produces a warning and a `discovery` row in `failures.csv`. If discovery fails before it
+finds a readable supported image, the operation creates a failed audit and returns exit
+code 1. A readable directory with no supported images still returns exit code 0 and does
+not create a run directory.
 
 ### Primary-image rules
 
@@ -561,22 +571,51 @@ Rank 1 is the highest rank. Path order resolves equal scores.
 
 ### Use the terminal display
 
-The terminal interface does not use a full screen. The output remains in terminal
-history.
+The terminal interface does not use a full screen, menus, mouse input, or cursor
+navigation. Output remains in terminal history.
 
-The interface shows:
+Display mode and selection-input mode are separate:
 
-- scan, model, and metadata status
-- source and output paths
-- compute device
-- metadata backend
-- preset and burst mode
-- evaluation progress and estimated time
-- the ten highest-ranked burst winners
-- the number of unique candidates
-- export confirmation
+- A terminal display uses color, animated status, and live progress unless you add
+  `--plain`.
+- A plain or redirected display uses static text without color. It writes one progress
+  line after each evaluation batch.
+- Photo Cull asks for an export count only when standard input and the display are both
+  terminals and `--select` is absent.
+- A script or redirected stream requests zero automatic selections unless you specify
+  `--select`. Feedback keeps still apply.
 
-Use `--plain` when a terminal does not correctly show animation or color.
+For example, `--plain` keeps the prompt in a normal terminal. Redirected input disables
+the prompt even when the display still supports Rich progress.
+
+The environment panel shows the current compute mode, source, output root,
+primary-image count, metadata backend, preset, and burst mode. During evaluation, a
+terminal display without `--plain` shows completed and total counts, percentage, and
+estimated time remaining. Static output shows processed and successful counts,
+percentage, rate, and ETA after each batch.
+
+When Photo Cull downloads direct model-weight files, it shows the cache destination and
+download progress. It also shows the total size when the server supplies it. Hugging Face
+controls the separate CLIP repository download display.
+
+After ranking, Photo Cull shows the ten highest-ranked burst winners. The table shows
+selection rank, global rank, filename, burst, focus, MUSIQ, aesthetic, and composite
+score. The complete winner count follows the table.
+
+Photo Cull writes `evaluation.csv` before it asks for an export count. At the prompt,
+press Enter or enter `none`, `skip`, or `0` to request zero automatic selections. Enter
+`all` or an integer from 1 through the displayed winner count to request selection slots.
+Feedback keeps still apply and can cause an export when the requested count is zero. EOF
+requests zero automatic selections. A bad interactive value shows an error and prompts
+again. A supplied `--select` value bypasses the prompt and remains suitable for scripts.
+
+Recoverable failures produce warnings and continue with other images. Fatal failures use
+an `Error:` message and a nonzero exit code. Use exit codes and report files in scripts;
+do not parse the formatted terminal output.
+
+Use `--plain` when a terminal does not correctly show animation or color. The formal
+interface contract and remaining platform-level limitations are in section 7 of
+`Specifications.md`.
 
 ### Use the review page
 
@@ -889,7 +928,8 @@ stored metrics:
   loads no model at all.
 - `wildlife` and `landscape` need two text prompts compared with the stored image
   embedding. Photo Cull loads the CLIP text tower once. It does not decode an image, it
-  does not load MUSIQ, and it does not run image inference.
+  does not load the CLIP image tower or MUSIQ, and it does not run image inference. A
+  supported accelerator failure retries this work on the CPU.
 - `portrait` needs the decoded pixels for face and eye detection, so it evaluates the
   images again.
 
@@ -925,14 +965,14 @@ Photo Cull writes a checkpoint after each successful new evaluation. It also rec
 each known failure immediately.
 
 The program can change from an accelerator to the CPU after a supported device or
-memory failure. For a large CLIP batch, it first divides the batch and tries smaller
-batches.
+memory failure. This behavior also applies when it scores cached embeddings for a new
+preset. For a large CLIP batch, it first divides the batch and tries smaller batches.
 
 The command uses these exit codes:
 
 | Code | Meaning |
 | ---: | --- |
-| 0 | The operation completed, or the source directory contained no supported images. |
+| 0 | The operation completed, or a readable source directory contained no supported images. |
 | 1 | A fatal pipeline failure occurred after the audit started. |
 | 2 | An argument, path, configuration, or startup error occurred. |
 | 130 | The user interrupted the operation with Ctrl+C. |
@@ -1037,7 +1077,9 @@ committed `uv.lock` records the Python dependency resolution.
 - Make sure that the file is not in an excluded output directory.
 
 The command returns exit code 0 when it finds no supported images. It does not create a
-run directory in this case.
+run directory in this case. If a discovery error prevents Photo Cull from finding any
+readable supported image, the command returns exit code 1 and writes a failed audit when
+the output root is writable.
 
 ### ExifTool is not available
 
