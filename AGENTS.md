@@ -13,12 +13,17 @@ invariant.
 
 Before a behavioral change, read:
 
-1. `readme.md` for the user contract and command reference.
-2. `Specifications.md` for scoring, grouping, cache, and export requirements.
-3. `PotentialEnhancements.md` for known limits and deferred work.
+1. `readme.md` for the user guide: install, first run, everyday tasks, and
+   troubleshooting.
+2. `docs/reference.md` for the user contract: every option, default, rule, score,
+   output column, and exit code.
+3. `Specifications.md` for scoring, grouping, cache, and export requirements.
+4. `PotentialEnhancements.md` for known limits and deferred work.
 
-Keep these files consistent with the implementation. The README uses
-ASD-STE100-style technical English. Use short, direct sentences when you change it.
+Keep these files consistent with the implementation. `docs/development.md` maps which
+document to update for each kind of change. The user documents use plain technical
+English: short sentences, active voice, and the reader addressed as "you".
+`docs/how-a-photograph-is-judged.md` is deliberately narrative prose.
 
 ## Environment and standard commands
 
@@ -52,7 +57,7 @@ an update. If the lock changes, include it in validation and explain why it chan
 | `metadata_reader.py` | ExifTool and Pillow metadata, timestamps, and timezone handling |
 | `model_config.py` | Model names, immutable revisions, URLs, and checksums |
 | `model_runtime.py` | Verified model download, model load, inference, batching, and device fallback |
-| `scoring.py` | Scoring profiles, focus factors, burst grouping, and composite scores |
+| `scoring.py` | Scoring profiles, focus factors, burst grouping, composite scores, and score reasons |
 | `advanced_analysis.py` | CLIP subject prompts and portrait face/eye checks |
 | `evaluation_cache.py` | SQLite cache schema, migration, lookup, and checkpoint writes |
 | `portfolio.py` | Feedback parsing, diversity selection, and HTML review output |
@@ -200,7 +205,8 @@ quality, performance, or reliability benefit. Constrain its version and update t
 lock file.
 
 Keep CLI option defaults in one implementation location. If an option, default, output
-field, or behavior changes, update the README and specification in the same change.
+field, or behavior changes, update `docs/reference.md`, the specification, and the README
+(when a workflow or common task is affected) in the same change.
 
 Do not hide a new failure mode. Add the failure to `failures.csv` or return a clear
 fatal error. Keep `run.json` useful after an interruption.
