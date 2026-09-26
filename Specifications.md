@@ -371,6 +371,8 @@ hit.
 
 ### Keeping and discarding evaluations
 
+- A new evaluation's preset-independent and preset-dependent metrics are written in one
+  transaction, so a failed write stores neither.
 - A failed cache write does not discard the evaluation. The record is kept for ranking,
   reporting, and export, and the fault is recorded as a `cache_write` failure.
 - The only condition that discards a completed evaluation is a changed file fingerprint,

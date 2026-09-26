@@ -32,8 +32,6 @@ from rich.progress import (
 from rich.table import Table
 
 from evaluation_cache import (
-    CachedEvaluation,
-    CachedPresetEvaluation,
     EvaluationCache,
     FileFingerprint,
     relative_key,
@@ -252,79 +250,6 @@ def check_exposure_clipping(cv_image: Any) -> tuple[float, float, float]:
     return blown_fraction, crushed_fraction, highlight_penalty * shadow_penalty
 
 
-def record_from_cache(
-    file_path: Path,
-    cached: CachedEvaluation,
-    preset_cached: CachedPresetEvaluation | None = None,
-) -> dict[str, Any]:
-    import imagehash
-    import numpy as np
-
-    embedding = np.frombuffer(cached.embedding_bytes, dtype="<f4")
-    if embedding.size != cached.embedding_length:
-        raise ValueError(f"Cached embedding has the wrong size for {file_path}")
-    preset_cached = preset_cached or CachedPresetEvaluation()
-    return {
-        "file_name": file_path.name,
-        "file_path": str(file_path.resolve()),
-        "timestamp": datetime.fromisoformat(cached.timestamp_iso),
-        "timestamp_source": cached.timestamp_source,
-        "timezone_source": cached.timezone_source,
-        "camera_model": cached.camera_model,
-        "camera_serial": cached.camera_serial,
-        "sequence_number": cached.sequence_number,
-        "autofocus_info": cached.autofocus_info,
-        "phash": imagehash.hex_to_hash(cached.phash_hex),
-        "focus_score": cached.focus_score,
-        "musiq_score": cached.musiq_score,
-        "blown_pct": cached.blown_pct,
-        "crushed_pct": cached.crushed_pct,
-        "exposure_penalty": cached.exposure_penalty,
-        "aesthetic_score": cached.aesthetic_score,
-        "embedding": embedding.copy(),
-        "subject_integrity": preset_cached.subject_integrity,
-        "face_count": preset_cached.face_count,
-        "eye_count": preset_cached.eye_count,
-        "eye_factor": preset_cached.eye_factor,
-        "eye_warning": preset_cached.eye_warning,
-        "cache_hit": True,
-    }
-
-
-def record_to_preset_cache(record: dict[str, Any]) -> CachedPresetEvaluation:
-    return CachedPresetEvaluation(
-        subject_integrity=float(record["subject_integrity"]),
-        face_count=int(record["face_count"]),
-        eye_count=int(record["eye_count"]),
-        eye_factor=float(record["eye_factor"]),
-        eye_warning=str(record["eye_warning"]),
-    )
-
-
-def record_to_cache(record: dict[str, Any]) -> CachedEvaluation:
-    import numpy as np
-
-    embedding = np.asarray(record["embedding"], dtype="<f4")
-    return CachedEvaluation(
-        timestamp_iso=record["timestamp"].isoformat(),
-        timestamp_source=str(record["timestamp_source"]),
-        timezone_source=str(record["timezone_source"]),
-        camera_model=str(record["camera_model"]),
-        camera_serial=str(record["camera_serial"]),
-        sequence_number=str(record["sequence_number"]),
-        autofocus_info=str(record["autofocus_info"]),
-        phash_hex=str(record["phash"]),
-        focus_score=float(record["focus_score"]),
-        musiq_score=float(record["musiq_score"]),
-        blown_pct=float(record["blown_pct"]),
-        crushed_pct=float(record["crushed_pct"]),
-        exposure_penalty=float(record["exposure_penalty"]),
-        aesthetic_score=float(record["aesthetic_score"]),
-        embedding_bytes=embedding.tobytes(),
-        embedding_length=int(embedding.size),
-    )
-
-
 def run_pipeline(config: PipelineConfig) -> int:
     from model_config import (
         AESTHETIC_MODEL_REVISION,
@@ -451,7 +376,7 @@ def _execute_pipeline(
     pending_files: list[tuple[Path, FileFingerprint]] = []
     # Files whose preset-independent metrics are cached but whose preset-specific
     # score is missing. These need no decode and no image-tower inference.
-    preset_pending: list[tuple[Path, CachedEvaluation]] = []
+    preset_pending: list[tuple[Path, dict[str, Any]]] = []
     cache_context = (
         nullcontext(None)
         if config.cache_mode == "none"
@@ -463,27 +388,23 @@ def _execute_pipeline(
         for file_path in all_files:
             try:
                 fingerprint = FileFingerprint.from_path(file_path)
-                cached = (
+                hit = (
                     None
                     if evaluation_cache is None or config.cache_mode == "refresh"
-                    else evaluation_cache.get(file_path, fingerprint, cache_signature)
+                    else evaluation_cache.lookup(
+                        file_path, fingerprint, cache_signature, config.preset
+                    )
                 )
-                if cached is None:
+                if hit is None:
                     pending_files.append((file_path, fingerprint))
-                    continue
-                preset_cached = (
-                    None
-                    if evaluation_cache is None
-                    else evaluation_cache.get_preset(file_path, cache_signature, config.preset)
-                )
-                if preset_cached is not None:
-                    records.append(record_from_cache(file_path, cached, preset_cached))
+                elif not hit.preset_missing:
+                    records.append(hit.record)
                 elif profile.name == "portrait":
                     # Face and eye detection needs decoded pixels, so portrait is
                     # the one preset a cached embedding alone cannot satisfy.
                     pending_files.append((file_path, fingerprint))
                 else:
-                    preset_pending.append((file_path, cached))
+                    preset_pending.append((file_path, hit.record))
             except Exception as error:
                 audit.record_failure(file_path, "cache_lookup", error)
                 _warning(f"Could not inspect {file_path}: {error}")
@@ -812,7 +733,7 @@ def _execute_pipeline(
 
 
 def _refresh_preset_scores(
-    preset_pending: list[tuple[Path, CachedEvaluation]],
+    restored: list[tuple[Path, dict[str, Any]]],
     profile: ScoringProfile,
     config: PipelineConfig,
     evaluation_cache: EvaluationCache | None,
@@ -828,9 +749,6 @@ def _refresh_preset_scores(
     from advanced_analysis import SUBJECT_PROMPTS
 
     started = perf_counter()
-    restored = [
-        (file_path, record_from_cache(file_path, cached)) for file_path, cached in preset_pending
-    ]
 
     if SUBJECT_PROMPTS.get(profile.name) is None:
         # Balanced defines no prompts, so subject integrity is the constant 1.0
@@ -862,12 +780,7 @@ def _refresh_preset_scores(
         record["subject_integrity"] = float(score)
         if evaluation_cache is not None:
             try:
-                evaluation_cache.put_preset(
-                    file_path,
-                    cache_signature,
-                    profile.name,
-                    record_to_preset_cache(record),
-                )
+                evaluation_cache.store_preset(file_path, cache_signature, profile.name, record)
             except Exception as error:
                 audit.record_failure(file_path, "cache_write", error)
                 _warning(f"Could not cache the {profile.name} score for {file_path}: {error}")
@@ -1037,17 +950,12 @@ def _evaluate_pending(
 
                 if evaluation_cache is not None:
                     try:
-                        evaluation_cache.put(
+                        evaluation_cache.store(
                             item.file_path,
                             item.fingerprint,
                             cache_signature,
-                            record_to_cache(record),
-                        )
-                        evaluation_cache.put_preset(
-                            item.file_path,
-                            cache_signature,
                             profile.name,
-                            record_to_preset_cache(record),
+                            record,
                         )
                     except Exception as error:
                         # A failed commit degrades to an uncached success. The

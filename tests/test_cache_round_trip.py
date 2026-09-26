@@ -1,10 +1,11 @@
 """End-to-end coverage of the cache hit path.
 
-`record_to_cache` -> `EvaluationCache.put` -> `get` -> `record_from_cache` is what
-makes a run resumable, and it is the one path a wrong value passes through
-invisibly. These tests need no network and no model download.
+`EvaluationCache.store` -> `lookup` is what makes a run resumable, and it is the
+one path a wrong value passes through invisibly. These tests need no network and
+no model download.
 """
 
+import sqlite3
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta, timezone
@@ -13,7 +14,6 @@ from pathlib import Path
 import imagehash
 import numpy as np
 
-import cull
 from evaluation_cache import EvaluationCache, FileFingerprint
 
 
@@ -60,16 +60,12 @@ class CacheRoundTripTests(unittest.TestCase):
             fingerprint = FileFingerprint.from_path(photo)
 
             with EvaluationCache(root / "cache.sqlite3", root) as cache:
-                cache.put(photo, fingerprint, "signature-1", cull.record_to_cache(original))
-                cache.put_preset(
-                    photo, "signature-1", "wildlife", cull.record_to_preset_cache(original)
-                )
-                cached = cache.get(photo, fingerprint, "signature-1")
-                preset_cached = cache.get_preset(photo, "signature-1", "wildlife")
+                cache.store(photo, fingerprint, "signature-1", "wildlife", original)
+                hit = cache.lookup(photo, fingerprint, "signature-1", "wildlife")
 
-            self.assertIsNotNone(cached)
-            self.assertIsNotNone(preset_cached)
-            restored = cull.record_from_cache(photo, cached, preset_cached)
+            self.assertIsNotNone(hit)
+            self.assertFalse(hit.preset_missing)
+            restored = hit.record
 
             # The binary embedding must come back bit-identical.
             np.testing.assert_array_equal(restored["embedding"], original["embedding"])
@@ -90,6 +86,8 @@ class CacheRoundTripTests(unittest.TestCase):
             )
 
             self.assertTrue(restored["cache_hit"])
+            self.assertEqual(restored["file_name"], original["file_name"])
+            self.assertEqual(restored["file_path"], original["file_path"])
             for field in (
                 "timestamp_source",
                 "timezone_source",
@@ -123,10 +121,8 @@ class CacheRoundTripTests(unittest.TestCase):
             fingerprint = FileFingerprint.from_path(photo)
 
             with EvaluationCache(root / "cache.sqlite3", root) as cache:
-                cache.put(photo, fingerprint, "signature-1", cull.record_to_cache(original))
-                restored = cull.record_from_cache(
-                    photo, cache.get(photo, fingerprint, "signature-1")
-                )
+                cache.store(photo, fingerprint, "signature-1", "balanced", original)
+                restored = cache.lookup(photo, fingerprint, "signature-1", "balanced").record
 
             self.assertEqual(restored["focus_score"], original["focus_score"])
             self.assertEqual(restored["aesthetic_score"], original["aesthetic_score"])
@@ -140,15 +136,14 @@ class CacheRoundTripTests(unittest.TestCase):
             fingerprint = FileFingerprint.from_path(photo)
 
             with EvaluationCache(root / "cache.sqlite3", root) as cache:
-                cache.put(photo, fingerprint, "signature-1", cull.record_to_cache(original))
+                cache.store(photo, fingerprint, "signature-1", "balanced", original)
                 cache.connection.execute(
                     "UPDATE evaluations SET embedding_length = embedding_length + 1"
                 )
                 cache.connection.commit()
-                cached = cache.get(photo, fingerprint, "signature-1")
 
-            with self.assertRaises(ValueError):
-                cull.record_from_cache(photo, cached)
+                with self.assertRaises(ValueError):
+                    cache.lookup(photo, fingerprint, "signature-1", "balanced")
 
     def test_restored_record_can_be_written_back_unchanged(self) -> None:
         """A cached record must be re-cacheable, so a resumed run stays stable."""
@@ -160,20 +155,82 @@ class CacheRoundTripTests(unittest.TestCase):
             fingerprint = FileFingerprint.from_path(photo)
 
             with EvaluationCache(root / "cache.sqlite3", root) as cache:
-                first = cull.record_to_cache(original)
-                first_preset = cull.record_to_preset_cache(original)
-                cache.put(photo, fingerprint, "signature-1", first)
-                cache.put_preset(photo, "signature-1", "portrait", first_preset)
-                restored = cull.record_from_cache(
-                    photo,
-                    cache.get(photo, fingerprint, "signature-1"),
-                    cache.get_preset(photo, "signature-1", "portrait"),
-                )
-                second = cull.record_to_cache(restored)
-                second_preset = cull.record_to_preset_cache(restored)
+                cache.store(photo, fingerprint, "signature-1", "portrait", original)
+                first = cache.connection.execute(
+                    "SELECT * FROM evaluations NATURAL JOIN preset_evaluations"
+                ).fetchall()
+                restored = cache.lookup(photo, fingerprint, "signature-1", "portrait").record
+                cache.store(photo, fingerprint, "signature-1", "portrait", restored)
+                second = cache.connection.execute(
+                    "SELECT * FROM evaluations NATURAL JOIN preset_evaluations"
+                ).fetchall()
 
+            self.assertEqual(len(first), 1)
             self.assertEqual(first, second)
-            self.assertEqual(first_preset, second_preset)
+
+
+class PresetMissingTests(unittest.TestCase):
+    def test_a_missing_preset_evaluation_returns_neutral_preset_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            photo = root / "photo.jpg"
+            photo.write_bytes(b"photo")
+            original = source_record(photo, datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
+            fingerprint = FileFingerprint.from_path(photo)
+
+            with EvaluationCache(root / "cache.sqlite3", root) as cache:
+                cache.store(photo, fingerprint, "signature-1", "wildlife", original)
+                hit = cache.lookup(photo, fingerprint, "signature-1", "landscape")
+
+            self.assertTrue(hit.preset_missing)
+            self.assertEqual(hit.record["aesthetic_score"], original["aesthetic_score"])
+            self.assertEqual(hit.record["subject_integrity"], 1.0)
+            self.assertEqual(hit.record["face_count"], 0)
+            self.assertEqual(hit.record["eye_count"], 0)
+            self.assertEqual(hit.record["eye_factor"], 1.0)
+            self.assertEqual(hit.record["eye_warning"], "")
+
+    def test_store_preset_fills_the_missing_preset_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            photo = root / "photo.jpg"
+            photo.write_bytes(b"photo")
+            original = source_record(photo, datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
+            fingerprint = FileFingerprint.from_path(photo)
+
+            with EvaluationCache(root / "cache.sqlite3", root) as cache:
+                cache.store(photo, fingerprint, "signature-1", "wildlife", original)
+                record = cache.lookup(photo, fingerprint, "signature-1", "landscape").record
+                record["subject_integrity"] = 0.625
+                cache.store_preset(photo, "signature-1", "landscape", record)
+                hit = cache.lookup(photo, fingerprint, "signature-1", "landscape")
+
+            self.assertFalse(hit.preset_missing)
+            self.assertEqual(hit.record["subject_integrity"], 0.625)
+
+    def test_a_failed_preset_write_leaves_no_base_evaluation(self) -> None:
+        """Both evaluations are written together, so no base row is orphaned."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            photo = root / "photo.jpg"
+            photo.write_bytes(b"photo")
+            original = source_record(photo, datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
+            fingerprint = FileFingerprint.from_path(photo)
+
+            with EvaluationCache(root / "cache.sqlite3", root) as cache:
+                cache.connection.execute(
+                    "CREATE TRIGGER refuse_preset BEFORE INSERT ON preset_evaluations "
+                    "BEGIN SELECT RAISE(ABORT, 'refused'); END"
+                )
+                cache.connection.commit()
+
+                with self.assertRaises(sqlite3.DatabaseError):
+                    cache.store(photo, fingerprint, "signature-1", "wildlife", original)
+                base_rows = cache.connection.execute(
+                    "SELECT COUNT(*) FROM evaluations"
+                ).fetchone()[0]
+
+            self.assertEqual(base_rows, 0)
 
 
 if __name__ == "__main__":

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 CACHE_SCHEMA_VERSION = 5
 SUPPORTED_SCHEMA_VERSIONS = (0, 1, 2, 3, 4, CACHE_SCHEMA_VERSION)
@@ -60,41 +61,100 @@ class FileFingerprint:
 
 
 @dataclass(frozen=True, slots=True)
-class CachedEvaluation:
-    """Metrics that do not depend on the scoring preset."""
+class CacheHit:
+    """A stored evaluation restored as a pipeline record.
 
-    timestamp_iso: str
-    timestamp_source: str
-    timezone_source: str
-    camera_model: str
-    camera_serial: str
-    sequence_number: str
-    autofocus_info: str
-    phash_hex: str
-    focus_score: float
-    musiq_score: float
-    blown_pct: float
-    crushed_pct: float
-    exposure_penalty: float
-    aesthetic_score: float
-    embedding_bytes: bytes
-    embedding_length: int
-
-
-@dataclass(frozen=True, slots=True)
-class CachedPresetEvaluation:
-    """Metrics whose meaning depends on the scoring preset.
-
-    Subject integrity comes from preset-specific CLIP prompts. The face and eye
-    values exist only for the portrait preset, which is the one preset that needs
-    the decoded pixels rather than the cached embedding.
+    When `preset_missing` is true, the record carries neutral preset values.
     """
 
-    subject_integrity: float = 1.0
-    face_count: int = 0
-    eye_count: int = 0
-    eye_factor: float = 1.0
-    eye_warning: str = ""
+    record: dict[str, Any]
+    preset_missing: bool
+
+
+# Neutral preset evaluation: no subject penalty and no face or eye findings.
+_PRESET_DEFAULTS = {
+    "subject_integrity": 1.0,
+    "face_count": 0,
+    "eye_count": 0,
+    "eye_factor": 1.0,
+    "eye_warning": "",
+}
+
+
+def _base_row(record: dict[str, Any]) -> tuple:
+    import numpy as np
+
+    embedding = np.asarray(record["embedding"], dtype="<f4")
+    row = {
+        "timestamp_iso": record["timestamp"].isoformat(),
+        "timestamp_source": str(record["timestamp_source"]),
+        "timezone_source": str(record["timezone_source"]),
+        "camera_model": str(record["camera_model"]),
+        "camera_serial": str(record["camera_serial"]),
+        "sequence_number": str(record["sequence_number"]),
+        "autofocus_info": str(record["autofocus_info"]),
+        "phash_hex": str(record["phash"]),
+        "focus_score": float(record["focus_score"]),
+        "musiq_score": float(record["musiq_score"]),
+        "blown_pct": float(record["blown_pct"]),
+        "crushed_pct": float(record["crushed_pct"]),
+        "exposure_penalty": float(record["exposure_penalty"]),
+        "aesthetic_score": float(record["aesthetic_score"]),
+        "embedding_bytes": embedding.tobytes(),
+        "embedding_length": int(embedding.size),
+    }
+    return tuple(row[name] for name in BASE_FIELDS)
+
+
+def _preset_row(record: dict[str, Any]) -> tuple:
+    row = {
+        "subject_integrity": float(record["subject_integrity"]),
+        "face_count": int(record["face_count"]),
+        "eye_count": int(record["eye_count"]),
+        "eye_factor": float(record["eye_factor"]),
+        "eye_warning": str(record["eye_warning"]),
+    }
+    return tuple(row[name] for name in PRESET_FIELDS)
+
+
+def _record(file_path: Path, base_row: tuple, preset_row: tuple | None) -> dict[str, Any]:
+    import imagehash
+    import numpy as np
+
+    base = dict(zip(BASE_FIELDS, base_row, strict=True))
+    preset = (
+        dict(zip(PRESET_FIELDS, preset_row, strict=True))
+        if preset_row is not None
+        else _PRESET_DEFAULTS
+    )
+    embedding = np.frombuffer(base["embedding_bytes"], dtype="<f4")
+    if embedding.size != base["embedding_length"]:
+        raise ValueError(f"Cached embedding has the wrong size for {file_path}")
+    return {
+        "file_name": file_path.name,
+        "file_path": str(file_path.resolve()),
+        "timestamp": datetime.fromisoformat(base["timestamp_iso"]),
+        "timestamp_source": base["timestamp_source"],
+        "timezone_source": base["timezone_source"],
+        "camera_model": base["camera_model"],
+        "camera_serial": base["camera_serial"],
+        "sequence_number": base["sequence_number"],
+        "autofocus_info": base["autofocus_info"],
+        "phash": imagehash.hex_to_hash(base["phash_hex"]),
+        "focus_score": base["focus_score"],
+        "musiq_score": base["musiq_score"],
+        "blown_pct": base["blown_pct"],
+        "crushed_pct": base["crushed_pct"],
+        "exposure_penalty": base["exposure_penalty"],
+        "aesthetic_score": base["aesthetic_score"],
+        "embedding": embedding.copy(),
+        "subject_integrity": preset["subject_integrity"],
+        "face_count": preset["face_count"],
+        "eye_count": preset["eye_count"],
+        "eye_factor": preset["eye_factor"],
+        "eye_warning": preset["eye_warning"],
+        "cache_hit": True,
+    }
 
 
 def strip_preset(signature: str) -> tuple[str, str]:
@@ -330,14 +390,20 @@ class EvaluationCache:
             (key, signature, preset, *values),
         )
 
-    def get(
+    def lookup(
         self,
         file_path: Path,
         fingerprint: FileFingerprint,
         pipeline_signature: str,
-    ) -> CachedEvaluation | None:
+        preset: str,
+    ) -> CacheHit | None:
+        """Return the stored evaluation as a record, or None on a miss.
+
+        Raises ValueError when a stored row cannot be restored.
+        """
         connection = self._connection()
-        row = connection.execute(
+        key = relative_key(file_path, self.source_root)
+        base_row = connection.execute(
             f"""
             SELECT {", ".join(BASE_FIELDS)}
             FROM evaluations
@@ -346,89 +412,111 @@ class EvaluationCache:
               AND size_bytes = ?
               AND modified_ns = ?
             """,
-            (
-                relative_key(file_path, self.source_root),
-                pipeline_signature,
-                fingerprint.size_bytes,
-                fingerprint.modified_ns,
-            ),
+            (key, pipeline_signature, fingerprint.size_bytes, fingerprint.modified_ns),
         ).fetchone()
-        return CachedEvaluation(*row) if row is not None else None
-
-    def get_preset(
-        self,
-        file_path: Path,
-        pipeline_signature: str,
-        preset: str,
-    ) -> CachedPresetEvaluation | None:
-        connection = self._connection()
-        row = connection.execute(
+        if base_row is None:
+            return None
+        preset_row = connection.execute(
             f"""
             SELECT {", ".join(PRESET_FIELDS)}
             FROM preset_evaluations
             WHERE relative_path = ? AND pipeline_signature = ? AND preset = ?
             """,
-            (relative_key(file_path, self.source_root), pipeline_signature, preset),
+            (key, pipeline_signature, preset),
         ).fetchone()
-        return CachedPresetEvaluation(*row) if row is not None else None
+        return CacheHit(
+            record=_record(file_path, base_row, preset_row),
+            preset_missing=preset_row is None,
+        )
 
-    def put(
+    def store(
         self,
         file_path: Path,
         fingerprint: FileFingerprint,
         pipeline_signature: str,
-        evaluation: CachedEvaluation,
+        preset: str,
+        record: dict[str, Any],
     ) -> None:
-        assignments = ", ".join(f"{name} = excluded.{name}" for name in BASE_FIELDS)
+        """Store the base and preset evaluations together, or neither."""
+        base_values = _base_row(record)
+        preset_values = _preset_row(record)
+        key = relative_key(file_path, self.source_root)
         connection = self._connection()
         with connection:
-            connection.execute(
-                f"""
-                INSERT INTO evaluations (
-                    relative_path, pipeline_signature, absolute_path, size_bytes, modified_ns,
-                    {", ".join(BASE_FIELDS)}
-                ) VALUES ({", ".join("?" * (5 + len(BASE_FIELDS)))})
-                ON CONFLICT(relative_path, pipeline_signature) DO UPDATE SET
-                    absolute_path = excluded.absolute_path,
-                    size_bytes = excluded.size_bytes,
-                    modified_ns = excluded.modified_ns,
-                    {assignments}
-                """,
-                (
-                    relative_key(file_path, self.source_root),
-                    pipeline_signature,
-                    str(file_path.resolve()),
-                    fingerprint.size_bytes,
-                    fingerprint.modified_ns,
-                    *(getattr(evaluation, name) for name in BASE_FIELDS),
-                ),
+            self._write_base(
+                connection,
+                key,
+                pipeline_signature,
+                str(file_path.resolve()),
+                fingerprint,
+                base_values,
             )
+            self._write_preset(connection, key, pipeline_signature, preset, preset_values)
 
-    def put_preset(
+    def store_preset(
         self,
         file_path: Path,
         pipeline_signature: str,
         preset: str,
-        evaluation: CachedPresetEvaluation,
+        record: dict[str, Any],
     ) -> None:
-        assignments = ", ".join(f"{name} = excluded.{name}" for name in PRESET_FIELDS)
+        preset_values = _preset_row(record)
+        key = relative_key(file_path, self.source_root)
         connection = self._connection()
         with connection:
-            connection.execute(
-                f"""
-                INSERT INTO preset_evaluations (
-                    relative_path, pipeline_signature, preset, {", ".join(PRESET_FIELDS)}
-                ) VALUES ({", ".join("?" * (3 + len(PRESET_FIELDS)))})
-                ON CONFLICT(relative_path, pipeline_signature, preset) DO UPDATE SET
-                    {assignments}
-                """,
-                (
-                    relative_key(file_path, self.source_root),
-                    pipeline_signature,
-                    preset,
-                    *(getattr(evaluation, name) for name in PRESET_FIELDS),
-                ),
-            )
+            self._write_preset(connection, key, pipeline_signature, preset, preset_values)
+
+    @staticmethod
+    def _write_base(
+        connection: sqlite3.Connection,
+        key: str,
+        signature: str,
+        absolute: str,
+        fingerprint: FileFingerprint,
+        values: tuple,
+    ) -> None:
+        assignments = ", ".join(f"{name} = excluded.{name}" for name in BASE_FIELDS)
+        connection.execute(
+            f"""
+            INSERT INTO evaluations (
+                relative_path, pipeline_signature, absolute_path, size_bytes, modified_ns,
+                {", ".join(BASE_FIELDS)}
+            ) VALUES ({", ".join("?" * (5 + len(BASE_FIELDS)))})
+            ON CONFLICT(relative_path, pipeline_signature) DO UPDATE SET
+                absolute_path = excluded.absolute_path,
+                size_bytes = excluded.size_bytes,
+                modified_ns = excluded.modified_ns,
+                {assignments}
+            """,
+            (
+                key,
+                signature,
+                absolute,
+                fingerprint.size_bytes,
+                fingerprint.modified_ns,
+                *values,
+            ),
+        )
+
+    @staticmethod
+    def _write_preset(
+        connection: sqlite3.Connection,
+        key: str,
+        signature: str,
+        preset: str,
+        values: tuple,
+    ) -> None:
+        assignments = ", ".join(f"{name} = excluded.{name}" for name in PRESET_FIELDS)
+        connection.execute(
+            f"""
+            INSERT INTO preset_evaluations (
+                relative_path, pipeline_signature, preset, {", ".join(PRESET_FIELDS)}
+            ) VALUES ({", ".join("?" * (3 + len(PRESET_FIELDS)))})
+            ON CONFLICT(relative_path, pipeline_signature, preset) DO UPDATE SET
+                {assignments}
+            """,
+            (key, signature, preset, *values),
+        )
 
     def _connection(self) -> sqlite3.Connection:
         if self.connection is None:

@@ -769,11 +769,11 @@ class CacheWriteFailureTests(unittest.TestCase):
             make_photos(source)
             config = build_config(source, output, cache_mode="use", selection="all")
 
-            def broken_put(*_args, **_kwargs):
+            def broken_store(*_args, **_kwargs):
                 raise sqlite3.OperationalError("database is locked")
 
             runtime_patch, device_patch = mocked_runtime()
-            with runtime_patch, device_patch, patch.object(EvaluationCache, "put", broken_put):
+            with runtime_patch, device_patch, patch.object(EvaluationCache, "store", broken_store):
                 exit_code = cull.run_pipeline(config)
 
             run_dir = latest_run(output)
