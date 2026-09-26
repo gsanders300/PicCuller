@@ -115,6 +115,34 @@ Composite = max(0, Aesthetic)
 Preset weights are defined in `scoring.py`, included in `run.json`, and deliberately
 treated as heuristics requiring validation against human feedback.
 
+`score_multipliers` returns the six weighted terms after the aesthetic base, and the
+composite multiplies them left to right, so the stored `*_multiplier` columns reproduce
+`composite_score` exactly. Explanations add no cache field and change no per-image metric,
+so they need no algorithm-version increment.
+
+### Score reasons
+
+After ranking, `describe_score_reasons` writes one `score_reason` per candidate by joining
+these clauses with `; `:
+
+1. Burst result, omitted under `--no-group`. A one-frame burst is `single shot`. The winner
+   names the second frame; any other frame names the winner. Each names the score gap as
+   a percentage of the higher score (`less than 1%`, whole percent, `more than 99%`, or
+   `100%` when the lower score is zero), and the comparison factor with the largest ratio.
+   The comparison factors are aesthetic, sharpness (absolute times relative focus
+   multiplier), technical quality, exposure, eye check, and subject check. Equal scores
+   state that path order decides.
+2. Standing among all candidates for aesthetic, sharpness (raw focus), and technical
+   quality (MUSIQ). The top percentage is the ceiling of 100 times the share of candidates
+   at or above the value; the bottom percentage uses the share at or below. The strongest
+   measurement is named at 25 percent or better, and the weakest remaining measurement at
+   25 percent or worse.
+3. Each exposure, eye, or subject multiplier at or below 0.95, with its percentage loss.
+   A non-empty eye warning with no penalty, such as `No face detected`, is named without a
+   loss.
+
+A record with no clause reads `no standout strength or penalty`.
+
 ## 4. Burst grouping and ranks
 
 Records are sorted by aware capture time and normalized path. Two consecutive frames
@@ -244,16 +272,22 @@ The interface presents information in this order:
    completed and total counts, percentage, and estimated time remaining.
    In static display mode, write one line per completed batch with processed and
    successful counts, percentage, rate, and ETA.
-8. Show at most ten burst winners in the `Top Selection Candidates` table. The columns
-   are selection rank, global rank, filename, burst identifier, focus, MUSIQ, aesthetic,
-   and composite score. Show the complete winner count after the table.
+8. Show at most ten burst winners in the `Top Burst Winners` table. The columns are
+   selection rank, path relative to the source root, composite score, and score reason.
+   Long paths and reasons wrap rather than truncate. After the table, show the shown,
+   winner, and candidate counts and a one-line statement of how the score is formed.
 9. Write `evaluation.csv` before any interactive selection prompt. An interrupt or a bad
    count at the prompt therefore does not discard completed metrics.
-10. Prompt for a count only in interactive selection mode.
-11. Generate the feedback and review artifacts. If the selection is empty, state that
-    export was skipped. Otherwise, show the selected-image count, copied-file count, and
-    `picks/` path after export completes.
-12. Show the `evaluation.csv` path when the run completes.
+10. Prompt for a count only in interactive selection mode. When the feedback file has
+    keeps, first state their number and that they count toward the requested number.
+11. Generate the feedback and review artifacts. If the selection is empty, state that no
+    photos were exported. Otherwise, show the `Exported Photos` table: selection order,
+    relative path, score, and `burst winner #N` or `marked keep in feedback`, at most 20
+    rows, with a count of any further rows. When `--diversity` is above zero, add a note
+    that diversity can replace a winner with a lower-ranked one.
+12. When the run completes, show the run-directory path and one line for each principal
+    output: `evaluation.csv`, `review.html` when generated, `picks/` with selected-image
+    and copied-file counts when not empty, and `failures.csv` when a failure occurred.
 
 Status animations must not erase prior warnings or results. Dynamic paths, filenames,
 and exception messages are escaped before Rich interprets markup. Terminal score values
@@ -279,8 +313,8 @@ selection larger than the requested count. EOF at the interactive prompt is equi
 
 ### 7.4 Warnings, errors, and interruption
 
-A recoverable per-image failure prints a warning, writes a `failures.csv` row, and lets
-other images continue. A fallback warning names the failed subsystem and the fallback.
+A recoverable per-image failure prints a `Warning:` line without a source location,
+writes a `failures.csv` row, and lets other images continue. A fallback warning names the failed subsystem and the fallback.
 A fatal failure prints an `Error:` message and returns a nonzero exit code. Scripts must
 use the exit code and report files instead of parsing Rich formatting.
 
@@ -330,8 +364,10 @@ model.
 
 ## 8. Portfolio review and feedback
 
-`review.html` contains local thumbnails, scores, keep/reject controls, and a browser-side
-feedback CSV download. Thumbnails come from a shared content-addressed store at
+`review.html` contains local thumbnails, scores, score reasons, keep/reject controls, and
+a browser-side feedback CSV download. Each card is labelled with its selection rank, or
+`Feedback keep` for a forced keep that is not a burst winner, and an `Exported` badge marks
+the current selection. The page is written after selection, so the badge is exact. Thumbnails come from a shared content-addressed store at
 `OUTPUT_ROOT/thumbnails/`, keyed by collection-relative path, size, modification time, and
 review dimension, and published into each run directory as hard links (falling back to a
 copy). A repeat run over unchanged photographs therefore decodes nothing: previously the

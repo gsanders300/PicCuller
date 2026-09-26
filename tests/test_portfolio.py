@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from portfolio import load_feedback, select_portfolio_candidates
+from portfolio import generate_contact_sheet, load_feedback, select_portfolio_candidates
 from xmp_rating import rating_for_rank
 
 
@@ -240,6 +240,40 @@ class DiversityEquivalenceTests(unittest.TestCase):
 
         self.assertEqual(len(selected), 120)
         self.assertEqual(len({item["file_path"] for item in selected}), 120)
+
+
+class ReviewPageTests(unittest.TestCase):
+    def test_cards_label_forced_keeps_and_mark_exports(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            thumbnail = root / "store.jpg"
+            thumbnail.write_bytes(b"jpeg")
+            common = {"aesthetic_score": 6.0, "musiq_score": 70.0}
+            winner = {
+                **common,
+                "file_path": str(root / "winner.jpg"),
+                "composite_score": 4.0,
+                "selection_rank": 1,
+                "score_reason": "best of 3 in burst",
+            }
+            kept = {
+                **common,
+                "file_path": str(root / "kept.jpg"),
+                "composite_score": 0.5,
+                "selection_rank": "",
+                "score_reason": "2nd of 3 in burst",
+            }
+            page = root / "run" / "review.html"
+
+            generated, failures = generate_contact_sheet(
+                page, [winner, kept], lambda _source: thumbnail, {kept["file_path"]}
+            )
+
+            html = page.read_text(encoding="utf-8")
+            self.assertEqual((generated, failures), (2, []))
+            self.assertIn("<h2>#1 winner.jpg</h2>", html)
+            self.assertIn('<h2>Feedback keep kept.jpg <span class="badge">Exported</span></h2>', html)
+            self.assertIn("2nd of 3 in burst", html)
 
 
 if __name__ == "__main__":

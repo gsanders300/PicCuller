@@ -220,6 +220,7 @@ def generate_contact_sheet(
     destination: Path,
     candidates: list[dict[str, Any]],
     thumbnail_provider: Callable[[Path], Path],
+    selected_paths: set[str] | None = None,
 ) -> tuple[int, list[tuple[Path, Exception]]]:
     """Generate a self-contained local review page with downloadable feedback.
 
@@ -227,10 +228,12 @@ def generate_contact_sheet(
     Keeping generation behind that callable lets the caller reuse thumbnails
     across runs instead of decoding every source again.
     """
+    selected_paths = selected_paths or set()
     thumbnail_dir = destination.parent / "thumbnails"
     thumbnail_dir.mkdir(parents=True, exist_ok=True)
     cards: list[str] = []
     failures: list[tuple[Path, Exception]] = []
+    exported_count = 0
 
     for index, candidate in enumerate(candidates, start=1):
         source = Path(candidate["file_path"])
@@ -244,16 +247,22 @@ def generate_contact_sheet(
         path_text = str(source.resolve())
         metrics = (
             f"Score {float(candidate['composite_score']):.2f} · "
-            f"Focus {float(candidate['focus_score']):.1f} · "
-            f"MUSIQ {float(candidate['musiq_score']):.1f} · "
-            f"Aesthetic {float(candidate['aesthetic_score']):.2f}"
+            f"Aesthetic {float(candidate['aesthetic_score']):.2f} · "
+            f"MUSIQ {float(candidate['musiq_score']):.1f}"
         )
+        rank = candidate.get("selection_rank", "")
+        # A forced keep that lost its burst has no winner rank to show.
+        label = f"#{rank}" if rank != "" else "Feedback keep"
+        exported = path_text in selected_paths
+        exported_count += exported
+        badge = ' <span class="badge">Exported</span>' if exported else ""
         cards.append(
             f"""
             <article class="card" data-path="{escape(path_text, quote=True)}">
               <img src="thumbnails/{thumbnail_name}" alt="{escape(source.name, quote=True)}" loading="lazy">
-              <h2>#{candidate.get("selection_rank", index)} {escape(source.name)}</h2>
+              <h2>{escape(label)} {escape(source.name)}{badge}</h2>
               <p>{escape(metrics)}</p>
+              <p class="reason">{escape(str(candidate.get("score_reason", "")))}</p>
               <div><button data-decision="keep">Keep</button><button data-decision="reject">Reject</button></div>
             </article>
             """
@@ -267,7 +276,8 @@ body{{font:15px system-ui;background:#111;color:#eee;margin:1rem}}header{{positi
 .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem}}.card{{background:#222;padding:.75rem;border-radius:8px}}
 .card img{{width:100%;height:220px;object-fit:contain;background:#000}}h2{{font-size:1rem;overflow-wrap:anywhere}}p{{color:#bbb}}
 button{{margin-right:.5rem;padding:.5rem 1rem}}.keep{{outline:3px solid #3c6}}.reject{{opacity:.4;outline:3px solid #d55}}
-</style></head><body><header><h1>Photo Cull Review</h1><p>{len(cards)} candidates. Mark decisions, then download feedback for a future run.</p>
+.reason{{font-size:.85rem}}.badge{{font-size:.75rem;background:#3c6;color:#111;padding:.1rem .4rem;border-radius:4px}}
+</style></head><body><header><h1>Photo Cull Review</h1><p>{len(cards)} photos, {exported_count} exported. Mark decisions, then download feedback for a future run.</p>
 <button id="download">Download feedback.csv</button></header><main class="grid">{"".join(cards)}</main>
 <script>
 const decisions={{}};

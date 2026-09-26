@@ -274,6 +274,11 @@ Our heron photo has now reached the end of its journey. It placed second in its 
 means it lost to the frame beside it, which means it never reaches the shortlist. Its
 neighbor, `DSC_4470.NEF`, was very slightly sharper and goes forward in its place.
 
+Each row also carries a one-line reason in plain words. For our heron it reads something
+like `2nd of 9 in burst; scored 3% lower than DSC_4470.NEF, mainly on sharpness`. The
+terminal shows the same kind of line beside each shortlisted winner, so you can see why a
+frame won without opening a spreadsheet.
+
 Before anything else happens, the program writes every one of these numbers to
 `evaluation.csv`, one row per photograph. This happens before it asks you any questions, so
 that an interruption cannot throw away work that has already been done.

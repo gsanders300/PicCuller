@@ -222,6 +222,63 @@ class PipelineIntegrationTests(unittest.TestCase):
             self.assertNotIn("\x1b", rendered)
             self.assertLess(rendered.index("Run directory:"), rendered.index("Evaluation:"))
 
+    def test_the_run_ends_with_the_export_list_and_every_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+            stream = io.StringIO()
+            test_console = Console(file=stream, force_terminal=False, no_color=True, width=120)
+            config = build_config(source, output, selection="1", write_xmp=False)
+
+            with patch.object(cull, "console", test_console):
+                exit_code = run_with_mocks(config)
+
+            rendered = stream.getvalue()
+            self.assertEqual(exit_code, 0)
+            self.assertIn("Top Burst Winners", rendered)
+            self.assertIn(str(Path("day-one") / "same.jpg"), rendered)
+            self.assertIn("Exported Photos", rendered)
+            self.assertIn("burst winner #1", rendered)
+            finished = rendered[rendered.index("Run finished:") :]
+            for name in ("evaluation.csv", "review.html", "picks/"):
+                self.assertIn(name, finished)
+            self.assertNotIn("failures.csv", finished)
+
+    def test_evaluation_csv_explains_every_photo(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+
+            self.assertEqual(run_with_mocks(build_config(source, output, no_group=False)), 0)
+
+            rows = read_rows(latest_run(output) / "evaluation.csv")
+            self.assertEqual(len(rows), 2)
+            for row in rows:
+                self.assertTrue(row["score_reason"])
+                product = float(row["aesthetic_score"])
+                for field in cull.SCORE_MULTIPLIER_FIELDS:
+                    product *= float(row[field])
+                self.assertEqual(product, float(row["composite_score"]))
+
+    def test_the_review_page_marks_exports_and_shows_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+
+            self.assertEqual(run_with_mocks(build_config(source, output, selection="1")), 0)
+
+            page = (latest_run(output) / "review.html").read_text(encoding="utf-8")
+            self.assertEqual(page.count('<span class="badge">Exported</span>'), 1)
+            self.assertIn("2 photos, 1 exported", page)
+            self.assertIn('<p class="reason">', page)
+            self.assertNotIn("<h2># ", page)
+
 
 class StageInstrumentationTests(unittest.TestCase):
     """Per-phase wall clock overlaps, so throughput work needs per-stage totals."""

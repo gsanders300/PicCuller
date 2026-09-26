@@ -18,6 +18,7 @@ from typing import Any
 
 from rich.console import Console
 from rich.markup import escape
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
@@ -58,12 +59,15 @@ from portfolio import (
 )
 from run_audit import RunAudit, atomic_write_csv
 from scoring import (
+    SCORE_MULTIPLIER_FIELDS,
     SCORING_PROFILES,
     ScoringProfile,
     assign_session_focus_factors,
     calculate_composite_score,
+    describe_score_reasons,
     get_scoring_profile,
     group_bursts,
+    score_multipliers,
 )
 from xmp_rating import rating_for_rank, write_xmp_rating
 
@@ -71,6 +75,8 @@ console = Console()
 
 MAX_IMAGE_DIMENSION = 1024
 MAX_THUMBNAIL_DIMENSION = 480
+SUMMARY_ROWS = 10
+EXPORT_TABLE_ROWS = 20
 # Roughly 40 to 60 KB per entry, so the default bounds the shared store near 1 GB.
 THUMBNAIL_STORE_LIMIT = 20000
 # 5: aspect-correct JPEG draft scaling (including RAW previews), per-channel
@@ -108,7 +114,9 @@ REPORT_FIELDS = (
     "blown_pct",
     "crushed_pct",
     "exposure_penalty",
+    *SCORE_MULTIPLIER_FIELDS,
     "composite_score",
+    "score_reason",
     "feedback_decision",
     "portfolio_selected",
     "cache_hit",
@@ -603,6 +611,7 @@ def _execute_pipeline(
             record["burst_id"] = burst_id
             record["burst_size"] = 1
             record["relative_focus_factor"] = 1.0
+            record.update(score_multipliers(record, profile=profile))
             record["composite_score"] = calculate_composite_score(
                 record,
                 profile=profile,
@@ -617,13 +626,14 @@ def _execute_pipeline(
             profile=profile,
         )
     winners = _assign_ranks(records)
+    describe_score_reasons(records, grouped=not config.no_group)
     audit.set_count("winners", len(winners))
 
     for record in records:
         record["feedback_decision"] = feedback.get(record["file_path"], "")
         record["portfolio_selected"] = False
 
-    _show_summary(winners)
+    _show_summary(winners, len(records), folder)
 
     # Persist the expensive metrics before the interactive prompt. An interrupt or
     # a rejected selection value must not discard a completed evaluation pass.
@@ -633,7 +643,8 @@ def _execute_pipeline(
     audit.add_output("evaluation", evaluation_file)
 
     audit.set_phase("awaiting_selection")
-    requested_count = _selection_count(config.selection, len(winners))
+    keep_count = sum(record["feedback_decision"] == "keep" for record in records)
+    requested_count = _selection_count(config.selection, len(winners), keep_count)
     candidate_pool = list(winners)
     candidate_paths = {record["file_path"] for record in candidate_pool}
     candidate_pool.extend(
@@ -665,6 +676,8 @@ def _execute_pipeline(
     )
     audit.add_output("feedback", feedback_template)
 
+    selected_paths = {record["file_path"] for record in selected}
+    outputs = [("evaluation.csv", "score, factors, and reason for every photo")]
     if config.contact_sheet_count > 0:
         audit.set_phase("contact_sheet")
         review_candidates = candidate_pool[: config.contact_sheet_count]
@@ -687,7 +700,9 @@ def _execute_pipeline(
             contact_sheet,
             review_candidates,
             provide_thumbnail,
+            selected_paths,
         )
+        outputs.append(("review.html", f"thumbnails of {generated} photos"))
         for file_path, error in thumbnail_failures:
             audit.record_failure(file_path, "contact_sheet", error)
         audit.data["counts"]["contact_sheet_images"] = generated
@@ -775,21 +790,24 @@ def _execute_pipeline(
         audit.add_output("picks", picks_dir)
         audit.add_output("export_manifest", export_manifest)
 
-        console.print(
-            Panel.fit(
-                f"Copied [bold green]{len(selected)}[/bold green] selections "
-                f"([cyan]{copied_count}[/cyan] files) to\n"
-                f"[bold cyan]{escape(str(picks_dir))}[/bold cyan]",
-                title="Export Finished",
+        _show_exported(selected, folder, config.diversity)
+        outputs.append(
+            (
+                "picks/",
+                (
+                    f"{len(selected)} exported photos as {copied_count} files "
+                    "(RAW/JPEG pairs and sidecars included)"
+                ),
             )
         )
     else:
-        console.print(
-            "[dim]Selection skipped; reports and review artifacts were still created.[/dim]"
-        )
+        console.print("No photos were exported.")
 
+    failure_count = int(audit.data["counts"]["failed"])
+    if failure_count:
+        outputs.append(("failures.csv", f"{failure_count} problems recorded"))
     audit.finish("completed")
-    console.print(f"[bold green]Run report:[/bold green] {escape(str(evaluation_file))}")
+    _show_outputs(run_dir, outputs)
     return 0
 
 
@@ -1151,32 +1169,80 @@ def _show_environment(
     )
 
 
-def _show_summary(winners: list[dict[str, Any]]) -> None:
-    table = Table(title="Top Selection Candidates", header_style="bold magenta")
-    for name, justification in (
-        ("Select", "center"),
-        ("Global", "center"),
-        ("Filename", "left"),
-        ("Burst", "center"),
-        ("Focus", "right"),
-        ("MUSIQ", "right"),
-        ("Aesthetic", "right"),
-        ("Composite", "right"),
-    ):
-        table.add_column(name, justify=justification)
-    for record in winners[:10]:
+def _show_summary(
+    winners: list[dict[str, Any]],
+    candidate_count: int,
+    source_root: Path,
+) -> None:
+    table = Table(title="Top Burst Winners", header_style="bold magenta", show_lines=True)
+    table.add_column("#", justify="right", no_wrap=True)
+    table.add_column("Photo", overflow="fold")
+    table.add_column("Score", justify="right", no_wrap=True)
+    table.add_column("Why", overflow="fold")
+    for record in winners[:SUMMARY_ROWS]:
         table.add_row(
             str(record["selection_rank"]),
-            str(record["global_quality_rank"]),
-            escape(record["file_name"]),
-            str(record["burst_id"]),
-            f"{record['focus_score']:.1f}",
-            f"{record['musiq_score']:.1f}",
-            f"{record['aesthetic_score']:.2f}",
+            escape(_display_path(record, source_root)),
             f"{record['composite_score']:.2f}",
+            escape(record["score_reason"]),
         )
     console.print(table)
-    console.print(f"[cyan]Found {len(winners)} unique candidates.[/cyan]")
+    console.print(
+        f"Showing {min(SUMMARY_ROWS, len(winners))} of {len(winners)} burst winners "
+        f"(the best frame of each burst) from {candidate_count} photos.\n"
+        "[dim]Score = aesthetic score multiplied by sharpness, technical-quality, exposure, "
+        "and preset factors (each 0 to 1). evaluation.csv explains every photo, including "
+        "frames that lost their burst.[/dim]"
+    )
+
+
+def _show_exported(
+    selected: list[dict[str, Any]],
+    source_root: Path,
+    diversity: float,
+) -> None:
+    table = Table(title="Exported Photos", header_style="bold magenta")
+    table.add_column("#", justify="right", no_wrap=True)
+    table.add_column("Photo", overflow="fold")
+    table.add_column("Score", justify="right", no_wrap=True)
+    table.add_column("Selected because", overflow="fold")
+    for order, record in enumerate(selected[:EXPORT_TABLE_ROWS], start=1):
+        table.add_row(
+            str(order),
+            escape(_display_path(record, source_root)),
+            f"{record['composite_score']:.2f}",
+            (
+                "marked keep in feedback"
+                if record["feedback_decision"] == "keep"
+                else f"burst winner #{record['selection_rank']}"
+            ),
+        )
+    console.print(table)
+    if len(selected) > EXPORT_TABLE_ROWS:
+        console.print(
+            f"{len(selected) - EXPORT_TABLE_ROWS} more exported photos are marked "
+            "portfolio_selected in evaluation.csv."
+        )
+    if diversity > 0:
+        console.print(
+            f"[dim]Diversity {diversity:g} can replace a winner with a lower-ranked one "
+            "that looks less like the photos already chosen.[/dim]"
+        )
+
+
+def _show_outputs(run_dir: Path, outputs: list[tuple[str, str]]) -> None:
+    console.print(f"[bold green]Run finished:[/bold green] {escape(str(run_dir))}")
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="cyan", no_wrap=True)
+    grid.add_column(overflow="fold")
+    for name, description in outputs:
+        grid.add_row(escape(name), escape(description))
+    console.print(Padding(grid, (0, 0, 0, 2)))
+
+
+def _display_path(record: dict[str, Any], source_root: Path) -> str:
+    """Show the path inside the collection, so equal file names stay distinct."""
+    return str(Path(record["file_path"]).relative_to(source_root))
 
 
 def _thumbnail_key(source: Path, source_root: Path) -> str:
@@ -1252,14 +1318,17 @@ def _write_evaluation_csv(destination: Path, records: list[dict[str, Any]]) -> N
     )
 
 
-def _selection_count(value: str | None, available: int) -> int:
+def _selection_count(value: str | None, available: int, keep_count: int = 0) -> int:
     if value is not None:
         return _parse_selection_count(value, available)
 
+    keeps = f"{keep_count} {'photo' if keep_count == 1 else 'photos'} marked keep in the feedback file"
     if console.is_terminal and sys.stdin.isatty():
+        if keep_count:
+            console.print(f"{keeps} will be exported and count toward this number.")
         prompt = (
-            f"[bold yellow]Automatic selections (1-{available}, all, or Enter for none; "
-            "feedback keeps still apply): [/bold yellow]"
+            f"[bold yellow]How many photos to export, best first? "
+            f"(1-{available}, 'all', or Enter for none): [/bold yellow]"
         )
         while True:
             try:
@@ -1271,10 +1340,10 @@ def _selection_count(value: str | None, available: int) -> int:
             except ValueError as error:
                 _warning(f"{error}. Try again.")
 
-    console.print(
-        "[dim]Non-interactive input detected; requesting zero automatic selections. "
-        "Feedback keeps still apply.[/dim]"
-    )
+    message = "No interactive terminal, so no photos are exported automatically. Use --select."
+    if keep_count:
+        message += f" {keeps} will still be exported."
+    console.print(f"[dim]{message}[/dim]")
     return 0
 
 
@@ -1462,7 +1531,7 @@ def _status(message: str, config: PipelineConfig):
 
 
 def _warning(message: str) -> None:
-    console.log(f"[yellow]{escape(message)}[/yellow]")
+    console.print(f"[yellow]Warning:[/yellow] {escape(message)}")
 
 
 def _error(message: str) -> None:
@@ -1478,24 +1547,71 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir", type=Path, help="Output root (default: <folder>/.photo-cull)"
     )
-    parser.add_argument("--preset", choices=sorted(SCORING_PROFILES), default="balanced")
+    parser.add_argument(
+        "--preset",
+        choices=sorted(SCORING_PROFILES),
+        default="balanced",
+        help="Scoring profile for the kind of photography (default: %(default)s)",
+    )
     parser.add_argument(
         "--primary",
         choices=("raw", "jpeg", "all"),
         default="raw",
-        help="Preferred file in RAW+JPEG pairs",
+        help="Preferred file in RAW+JPEG pairs (default: %(default)s)",
     )
-    parser.add_argument("--burst-window", type=float, default=2.0)
-    parser.add_argument("--max-burst-duration", type=float, default=10.0)
-    parser.add_argument("--phash-threshold", type=int, default=8)
-    parser.add_argument("--sim-threshold", type=float, default=0.88)
-    parser.add_argument("--no-group", action="store_true")
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
-    parser.add_argument("--no-mixed-precision", action="store_true")
     parser.add_argument(
-        "--metadata-backend", choices=("auto", "exiftool", "pillow"), default="auto"
+        "--burst-window",
+        type=float,
+        default=2.0,
+        help="Maximum seconds between two frames of one burst (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--max-burst-duration",
+        type=float,
+        default=10.0,
+        help="Maximum seconds from the first to the last frame of a burst (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--phash-threshold",
+        type=int,
+        default=8,
+        help="Maximum perceptual-hash distance for similar frames (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--sim-threshold",
+        type=float,
+        default=0.88,
+        help="Minimum CLIP similarity, 0 to 1, for similar frames (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no-group", action="store_true", help="Treat every photo as its own burst"
+    )
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+        help="Compute device (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="Photos per CLIP inference batch (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=min(4, os.cpu_count() or 1),
+        help="Image decode threads (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no-mixed-precision", action="store_true", help="Disable CUDA mixed precision"
+    )
+    parser.add_argument(
+        "--metadata-backend",
+        choices=("auto", "exiftool", "pillow"),
+        default="auto",
+        help="Metadata reader; auto uses ExifTool when available (default: %(default)s)",
     )
     parser.add_argument(
         "--assume-timezone", help="IANA timezone for EXIF timestamps without offsets"
@@ -1503,16 +1619,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--select",
         dest="selection",
-        help="Automatic selection count, 'all', or 'none'; feedback keeps still apply",
+        help=(
+            "Number of photos to export, 'all', or 'none'; skips the prompt. "
+            "Feedback keeps are always exported"
+        ),
     )
     parser.add_argument(
-        "--diversity", type=float, default=0.0, help="Portfolio diversity strength from 0 to 1"
+        "--diversity",
+        type=float,
+        default=0.0,
+        help="Prefer photos that look different, from 0 to 1 (default: %(default)s)",
     )
     parser.add_argument(
         "--feedback", type=Path, help="CSV containing file_path and keep/reject decision columns"
     )
     parser.add_argument(
-        "--contact-sheet", type=int, default=100, help="Maximum review thumbnails; 0 disables"
+        "--contact-sheet",
+        type=int,
+        default=100,
+        help="Maximum thumbnails on review.html; 0 skips the page (default: %(default)s)",
     )
     parser.add_argument(
         "--write-xmp", action="store_true", help="Write ratings only beside exported copies"
@@ -1527,8 +1652,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--debug", action="store_true", help="Show exception tracebacks")
     cache_group = parser.add_mutually_exclusive_group()
-    cache_group.add_argument("--no-cache", action="store_true")
-    cache_group.add_argument("--refresh-cache", action="store_true")
+    cache_group.add_argument(
+        "--no-cache", action="store_true", help="Do not read or write the evaluation cache"
+    )
+    cache_group.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        help="Evaluate every photo again and replace its cache entry",
+    )
     return parser
 
 

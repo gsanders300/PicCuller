@@ -138,12 +138,13 @@ uv run photo-cull /path/to/photos
 ~~~
 
 Photo Cull scans the source directory. The program then shows the ten highest-ranked
-burst winners.
+burst winners. Each row gives the reason for its position.
 
 If the terminal is interactive, the program asks for the number of images to export.
 Press Enter to request zero automatic selections. You can also enter `none`, `skip`, or
 `0`. Enter a positive integer or `all` to start the export. A `keep` decision in a
-feedback file can still force an export when the requested count is zero.
+feedback file can still force an export when the requested count is zero. Feedback keeps
+count toward the number that you enter.
 
 If the terminal is not interactive, the program requests zero automatic selections by
 default. Feedback keeps still apply. Use `--select` for a script or a
@@ -501,8 +502,8 @@ eyes does reduce the factor, because that is a statement about the photograph.
 The subject-integrity calculation compares one positive prompt with one negative
 prompt. The value is a heuristic probability. It is not an object detector.
 
-The portrait check gives an eye factor of 0.85 when it finds no face. It gives 0.7 when
-it finds fewer than two eyes for each face. It gives 1.0 in other cases.
+The portrait check gives an eye factor of 0.7 when it finds fewer than two eyes for each
+face. It gives 1.0 in other cases, which includes no face.
 
 The default model identities are:
 
@@ -540,6 +541,37 @@ composite =
 ~~~
 
 All factors in `clamp` have a range from zero through one.
+
+`evaluation.csv` records each weighted factor in a `*_multiplier` column. The aesthetic
+score multiplied by the six multipliers, in column order, equals `composite_score`.
+
+### Score reasons
+
+Photo Cull writes one plain-language reason for each candidate in the `score_reason`
+column of `evaluation.csv`. The terminal table and the review page show the same text.
+
+A reason can contain these parts, in this order:
+
+1. The burst result. A winner names the next-best frame, the score difference, and the
+   factor with the largest difference. A frame that did not win names the winner in the
+   same way. A burst with one frame shows `single shot`. `--no-group` removes this part.
+2. The standing among all candidates. The reason names the strongest measurement when it
+   is in the top 25 percent. It names the weakest measurement when it is in the bottom
+   25 percent. The measurements are aesthetic, sharpness, and technical quality.
+3. Each penalty that reduces the score by 5 percent or more: exposure clipping, a portrait
+   eye warning, or a weak subject check. The portrait `No face detected` warning shows
+   without a penalty, because it does not change the score.
+
+This is an example reason:
+
+~~~text
+best of 6 in burst; next best IMG_0412.CR3 scored 18% lower, mainly on sharpness;
+aesthetic in top 10% of all photos
+~~~
+
+The standing and the absolute focus factor compare a photograph with the other candidates
+in the same operation. The same photograph can receive a different score in a different
+collection.
 
 ### Burst rules
 
@@ -598,20 +630,32 @@ When Photo Cull downloads direct model-weight files, it shows the cache destinat
 download progress. It also shows the total size when the server supplies it. Hugging Face
 controls the separate CLIP repository download display.
 
-After ranking, Photo Cull shows the ten highest-ranked burst winners. The table shows
-selection rank, global rank, filename, burst, focus, MUSIQ, aesthetic, and composite
-score. The complete winner count follows the table.
+After ranking, Photo Cull shows the ten highest-ranked burst winners in the
+`Top Burst Winners` table. The table shows the selection rank, the path in the source
+directory, the composite score, and the [score reason](#score-reasons). A line below the
+table gives the winner and candidate counts and states how the score is calculated.
 
-Photo Cull writes `evaluation.csv` before it asks for an export count. At the prompt,
-press Enter or enter `none`, `skip`, or `0` to request zero automatic selections. Enter
-`all` or an integer from 1 through the displayed winner count to request selection slots.
-Feedback keeps still apply and can cause an export when the requested count is zero. EOF
-requests zero automatic selections. A bad interactive value shows an error and prompts
-again. A supplied `--select` value bypasses the prompt and remains suitable for scripts.
+Photo Cull writes `evaluation.csv` before it asks for an export count. The prompt is
+`How many photos to export, best first?`. Press Enter or enter `none`, `skip`, or `0` to
+request zero automatic selections. Enter `all` or an integer from 1 through the displayed
+winner count to request selection slots. When the feedback file has keeps, a line before
+the prompt gives their number and states that they count toward the requested number.
+Feedback keeps can cause an export when the requested count is zero. EOF requests zero
+automatic selections. A bad interactive value shows an error and prompts again. A supplied
+`--select` value bypasses the prompt and remains suitable for scripts.
 
-Recoverable failures produce warnings and continue with other images. Fatal failures use
-an `Error:` message and a nonzero exit code. Use exit codes and report files in scripts;
-do not parse the formatted terminal output.
+After an export, the `Exported Photos` table shows each exported photo in selection order,
+its score, and why Photo Cull selected it: its burst-winner rank or a feedback `keep`. The
+table shows at most 20 rows. The `portfolio_selected` column in `evaluation.csv` identifies
+all exported photos. When `--diversity` is more than zero, a note states that a
+lower-ranked winner can replace a similar higher-ranked winner.
+
+At the end, Photo Cull shows the run-directory path and lists the principal outputs:
+`evaluation.csv`, `review.html`, `picks/`, and `failures.csv` when a failure occurred.
+
+Recoverable failures produce a `Warning:` line and continue with other images. Fatal
+failures use an `Error:` message and a nonzero exit code. Use exit codes and report files
+in scripts; do not parse the formatted terminal output.
 
 Use `--plain` when a terminal does not correctly show animation or color. The formal
 interface contract and remaining platform-level limitations are in section 7 of
@@ -621,6 +665,10 @@ interface contract and remaining platform-level limitations are in section 7 of
 
 Open `review.html` in a web browser. The page uses local thumbnail files. It does not
 send the photographs to a service.
+
+Each card shows the selection rank, the file name, the score, and the score reason. A
+forced keep that is not a burst winner shows `Feedback keep` instead of a rank. An
+`Exported` label identifies each photo in the current selection.
 
 Select `Keep` or `Reject` for applicable images. Then select `Download feedback.csv`.
 The browser writes a new feedback file. The file contains only decisions that you made
@@ -798,7 +846,14 @@ order. Numeric values keep full precision.
 | `blown_pct` | Percentage of preview pixels with any channel at or above 254. |
 | `crushed_pct` | Percentage of preview pixels with every channel at or below 1. |
 | `exposure_penalty` | Combined highlight and shadow factor. |
-| `composite_score` | Final score used for rank order. |
+| `absolute_focus_multiplier` | Preset-weighted session focus factor. |
+| `relative_focus_multiplier` | Preset-weighted burst focus factor. It equals `relative_focus_factor`. |
+| `musiq_multiplier` | Preset-weighted MUSIQ factor. |
+| `exposure_multiplier` | Preset-weighted exposure factor. |
+| `eye_multiplier` | Preset-weighted portrait eye factor. |
+| `subject_multiplier` | Preset-weighted subject-integrity factor. |
+| `composite_score` | Final score used for rank order. It equals `aesthetic_score` multiplied by the six multipliers. |
+| `score_reason` | Plain-language reason for the score and the burst result. See [Score reasons](#score-reasons). |
 | `feedback_decision` | Applied `keep` or `reject` decision. |
 | `portfolio_selected` | `True` when the candidate is in the current selection. |
 | `cache_hit` | `True` when Photo Cull reused the stored evaluation. |
@@ -1151,11 +1206,13 @@ that can start a spreadsheet formula.
 
 Do these steps:
 
-1. Label representative images with `keep` and `reject`.
-2. Run `photo-cull-validate`.
-3. Compare all four presets.
-4. Change `--diversity` in small increments.
-5. Keep the original reports for comparison.
+1. Read the `score_reason` and `*_multiplier` columns in `evaluation.csv` to find the
+   factor that moved each photograph.
+2. Label representative images with `keep` and `reject`.
+3. Run `photo-cull-validate`.
+4. Compare all four presets.
+5. Change `--diversity` in small increments.
+6. Keep the original reports for comparison.
 
 Do not treat one small collection as sufficient validation.
 
