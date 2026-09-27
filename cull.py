@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import sys
-import tempfile
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
@@ -34,7 +32,6 @@ from rich.table import Table
 from evaluation_cache import (
     EvaluationCache,
     FileFingerprint,
-    relative_key,
 )
 from file_ops import (
     build_export_plan,
@@ -67,16 +64,14 @@ from scoring import (
     group_bursts,
     score_multipliers,
 )
+from thumbnail_store import ThumbnailStore
 from xmp_rating import rating_for_rank, write_xmp_rating
 
 console = Console()
 
 MAX_IMAGE_DIMENSION = 1024
-MAX_THUMBNAIL_DIMENSION = 480
 SUMMARY_ROWS = 10
 EXPORT_TABLE_ROWS = 20
-# Roughly 40 to 60 KB per entry, so the default bounds the shared store near 1 GB.
-THUMBNAIL_STORE_LIMIT = 20000
 # 5: aspect-correct JPEG draft scaling (including RAW previews), per-channel
 # exposure clipping, summed-area tile variance, a neutral eye factor when no face
 # is detected, and a non-zero landscape subject weight.
@@ -603,37 +598,29 @@ def _execute_pipeline(
         audit.set_phase("contact_sheet")
         review_candidates = candidate_pool[: config.contact_sheet_count]
         contact_sheet = run_dir / "review.html"
-        thumbnail_store = output_root / "thumbnails"
-        decoded = 0
-
-        def provide_thumbnail(source: Path) -> Path:
-            nonlocal decoded
-            target = thumbnail_store / f"{_thumbnail_key(source, folder)}.jpg"
-            if target.exists():
-                return target
-            started = perf_counter()
-            ready = _cached_thumbnail(thumbnail_store, source, folder)
-            decoded += 1
-            audit.accumulate_stage("thumbnail_decode", perf_counter() - started)
-            return ready
+        thumbnail_store = ThumbnailStore(output_root / "thumbnails", folder)
 
         generated, thumbnail_failures = generate_contact_sheet(
             contact_sheet,
             review_candidates,
-            provide_thumbnail,
+            thumbnail_store.thumbnail,
             selected_paths,
         )
         outputs.append(("review.html", f"thumbnails of {generated} photos"))
         for file_path, error in thumbnail_failures:
             audit.record_failure(file_path, "contact_sheet", error)
+        if thumbnail_store.decoded:
+            audit.accumulate_stage(
+                "thumbnail_decode", thumbnail_store.decode_seconds, thumbnail_store.decoded
+            )
         audit.data["counts"]["contact_sheet_images"] = generated
-        audit.data["counts"]["thumbnails_decoded"] = decoded
-        audit.data["counts"]["thumbnails_reused"] = generated - decoded
-        pruned = _prune_thumbnail_store(thumbnail_store)
+        audit.data["counts"]["thumbnails_decoded"] = thumbnail_store.decoded
+        audit.data["counts"]["thumbnails_reused"] = generated - thumbnail_store.decoded
+        pruned = thumbnail_store.prune()
         if pruned:
             audit.data["counts"]["thumbnails_pruned"] = pruned
         audit.add_output("contact_sheet", contact_sheet)
-        audit.add_output("thumbnail_store", thumbnail_store)
+        audit.add_output("thumbnail_store", thumbnail_store.root)
 
     if selected:
         audit.set_phase("export")
@@ -1151,71 +1138,6 @@ def _show_outputs(run_dir: Path, outputs: list[tuple[str, str]]) -> None:
 def _display_path(record: dict[str, Any], source_root: Path) -> str:
     """Show the path inside the collection, so equal file names stay distinct."""
     return str(Path(record["file_path"]).relative_to(source_root))
-
-
-def _thumbnail_key(source: Path, source_root: Path) -> str:
-    """Content identity for a review thumbnail.
-
-    The collection-relative path keeps the key stable when the collection moves,
-    matching the evaluation cache. Size and nanosecond modification time make an
-    edited file a different thumbnail.
-    """
-    stat = source.stat()
-    raw = (
-        f"{relative_key(source, source_root)}|{stat.st_size}"
-        f"|{stat.st_mtime_ns}|{MAX_THUMBNAIL_DIMENSION}"
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
-
-
-def _cached_thumbnail(store: Path, source: Path, source_root: Path) -> Path:
-    """Return a ready thumbnail, decoding the source only on a miss.
-
-    Source files are read-only and unchanged between runs, so a repeat pass over
-    the same shoot regenerates byte-identical previews. Caching them removes the
-    last decode from an otherwise fully cached run.
-    """
-    from image_loader import load_image
-
-    target = store / f"{_thumbnail_key(source, source_root)}.jpg"
-    if target.exists():
-        return target
-
-    store.mkdir(parents=True, exist_ok=True)
-    image = load_image(source, max_dim=MAX_THUMBNAIL_DIMENSION).pil_image
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=store,
-        prefix=f".{target.name}.",
-        suffix=".part",
-    )
-    os.close(descriptor)
-    temporary_path = Path(temporary_name)
-    try:
-        image.save(temporary_path, "JPEG", quality=86, optimize=True)
-        temporary_path.replace(target)
-    except Exception:
-        temporary_path.unlink(missing_ok=True)
-        raise
-    return target
-
-
-def _prune_thumbnail_store(store: Path, keep: int = THUMBNAIL_STORE_LIMIT) -> int:
-    """Bound the shared store, discarding the least recently modified entries."""
-    if not store.is_dir():
-        return 0
-    entries = sorted(
-        (path for path in store.glob("*.jpg") if path.is_file()),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    removed = 0
-    for path in entries[keep:]:
-        try:
-            path.unlink()
-            removed += 1
-        except OSError:
-            continue
-    return removed
 
 
 def _write_evaluation_csv(destination: Path, records: list[dict[str, Any]]) -> None:

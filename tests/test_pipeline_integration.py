@@ -14,6 +14,7 @@ from rich.console import Console
 
 import cull
 from evaluation_cache import EvaluationCache
+from thumbnail_store import ThumbnailStore
 
 
 class FakeModelRuntime:
@@ -536,7 +537,7 @@ class ThumbnailReuseTests(unittest.TestCase):
                 raise OSError("cannot decode")
 
             runtime_patch, device_patch = mocked_runtime()
-            with runtime_patch, device_patch, patch.object(cull, "_cached_thumbnail", refuse):
+            with runtime_patch, device_patch, patch.object(ThumbnailStore, "thumbnail", refuse):
                 exit_code = cull.run_pipeline(config)
 
             run_dir = latest_run(output)

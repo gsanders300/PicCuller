@@ -21,3 +21,9 @@ _Avoid_: base hit, partial hit
 **Preset refresh**:
 Producing a missing preset evaluation from a stored base evaluation without evaluating the image again.
 _Avoid_: rescoring, re-evaluation
+
+### Review page
+
+**Thumbnail store**:
+The bounded set of review thumbnails shared by every run over a collection, one per unchanged source image, so a repeat run decodes nothing for the review page.
+_Avoid_: thumbnail cache, contact-sheet cache

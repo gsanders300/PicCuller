@@ -69,6 +69,7 @@ The development group adds `pytest>=8,<10` and `ruff>=0.8,<1`.
 | `advanced_analysis.py` | CLIP subject prompts and portrait face and eye checks |
 | `evaluation_cache.py` | SQLite evaluation cache: schema, migration, lookup, and writes |
 | `portfolio.py` | Feedback, diversity selection, and the review page |
+| `thumbnail_store.py` | Review thumbnails shared across runs: identity, decode on a miss, and pruning |
 | `xmp_rating.py` | Export-only XMP ratings |
 | `run_audit.py` | Atomic audit, JSON, and CSV output, and failure records |
 | `validation.py` | The `photo-cull-validate` ranking check |
