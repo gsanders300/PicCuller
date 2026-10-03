@@ -19,3 +19,6 @@ sac_vit_l_14_linear.pth
 # Operating-system metadata
 .DS_Store
 Thumbs.db
+
+# Local planning and AI-session scratch files
+tasks/
