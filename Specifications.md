@@ -632,7 +632,8 @@ therefore proportional to picks times candidates rather than to the square of th
 ### Review page
 
 1. `review.html` contains local thumbnails, scores, score reasons, keep/reject controls,
-   and a browser-side feedback CSV download.
+   a full-screen viewer with zoom and keyboard marking, and a browser-side feedback CSV
+   download.
 2. It shows the first `--contact-sheet` candidates from the pool: burst winners in
    selection-rank order, then keeps that are not winners.
 3. Each card is labelled with its selection rank, or `Feedback keep` for a forced keep
@@ -640,9 +641,9 @@ therefore proportional to picks times candidates rather than to the square of th
    is written after selection, so the badge is exact.
 4. Thumbnails come from a shared content-addressed store at `OUTPUT_ROOT/thumbnails/`,
    keyed by collection-relative path, size, modification time, and review dimension
-   (480 pixels). They are published into each run directory as hard links, falling back
+   (2048 pixels). They are published into each run directory as hard links, falling back
    to a copy.
-5. The store is bounded to its 20000 most recent entries.
+5. The store is bounded to its 2000 most recent entries.
 
 **Why a shared store:** A repeat run over unchanged photographs therefore decodes nothing.
 Previously the review page re-decoded up to `--contact-sheet` sources on every run, which

@@ -10,9 +10,10 @@ from time import perf_counter
 
 from evaluation_cache import relative_key
 
-MAX_THUMBNAIL_DIMENSION = 480
-# Roughly 40 to 60 KB per entry, so the default bounds the shared store near 1 GB.
-THUMBNAIL_STORE_LIMIT = 20000
+# Large enough to judge focus and expression in the review page's full-window view.
+MAX_THUMBNAIL_DIMENSION = 2048
+# Roughly 0.5 to 1 MB per entry, so the default bounds the shared store near 2 GB.
+THUMBNAIL_STORE_LIMIT = 2000
 
 
 class ThumbnailStore:

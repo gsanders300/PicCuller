@@ -579,6 +579,10 @@ Each card shows the selection rank, file name, score, and score reason. A forced
 did not win its burst shows `Feedback keep` instead of a rank, and an `Exported` badge marks
 each photo in the current selection.
 
+Select a photo to open it full screen. Click the large photo to zoom to the preview's full
+resolution around that point, and click again to fit it to the window. In the full-screen
+view, the arrow keys move between photos, `K` marks keep, `R` marks reject, and `Esc` closes.
+
 Mark cards `Keep` or `Reject`, then select `Download feedback.csv`. The downloaded file
 contains only the decisions you made on the page. The page keeps decisions only in browser
 memory, so download before you close or reload it.
@@ -709,8 +713,9 @@ The editable feedback template for this run. See [Feedback files](#feedback-file
 
 ### review.html and thumbnails
 
-The review page and its JPEG previews, at most 480 pixels on the longest side. A thumbnail
-failure goes to `failures.csv`.
+The review page and its JPEG previews, at most 2048 pixels on the longest side. A RAW file
+whose embedded preview is smaller gives a smaller preview. A thumbnail failure goes to
+`failures.csv`.
 
 Previews are made once per source file and kept in a shared store at
 `OUTPUT_ROOT/thumbnails/`, so a repeat run over the same photos decodes nothing. Each run
@@ -720,7 +725,7 @@ refuses a link, Photo Cull copies instead.
 
 The store is keyed by the path relative to the source directory, the file size, and the
 modification time. It survives the collection moving, and an edited file gets a new preview.
-It keeps the 20000 most recent entries; `run.json` reports removed ones as
+It keeps the 2000 most recent entries, roughly 2 GB; `run.json` reports removed ones as
 `thumbnails_pruned`.
 
 ### picks/

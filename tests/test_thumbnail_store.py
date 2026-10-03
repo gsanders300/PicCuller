@@ -100,12 +100,12 @@ class ThumbnailDecodeTests(unittest.TestCase):
     def test_the_thumbnail_respects_the_review_dimension(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()
-            photo = write_photo(root, "a.jpg", size=(2400, 1600))
+            photo = write_photo(root, "a.jpg", size=(3000, 2000))
             store = ThumbnailStore(root / "thumbnails", root)
 
             with Image.open(store.thumbnail(photo)) as thumbnail:
                 self.assertLessEqual(max(thumbnail.size), MAX_THUMBNAIL_DIMENSION)
-                self.assertEqual(thumbnail.size, (480, 320))
+                self.assertEqual(thumbnail.size, (2048, 1365))
 
     def test_no_partial_file_survives_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

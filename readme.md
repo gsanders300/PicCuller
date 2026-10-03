@@ -288,7 +288,8 @@ relative/path/IMG_0003.ARW,keep
 
 The easiest start is the run's own `feedback.csv`. It lists every photo, with the current
 selection already marked `keep`, so change or add decisions and save it. You can also mark photos in `review.html` and select
-`Download feedback.csv`. Then rerun with `--feedback path/to/feedback.csv`.
+`Download feedback.csv`. Select a photo on the page to see it full screen, and click it to
+zoom in on detail such as focus. Then rerun with `--feedback path/to/feedback.csv`.
 
 - `keep` always exports the photo, even one that lost its burst.
 - `reject` never exports it.

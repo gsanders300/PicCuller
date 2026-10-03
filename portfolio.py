@@ -273,16 +273,33 @@ def generate_contact_sheet(
 <title>Photo Cull Review</title>
 <style>
 body{{font:15px system-ui;background:#111;color:#eee;margin:1rem}}header{{position:sticky;top:0;background:#111;padding:.5rem;z-index:2}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem}}.card{{background:#222;padding:.75rem;border-radius:8px}}
-.card img{{width:100%;height:220px;object-fit:contain;background:#000}}h2{{font-size:1rem;overflow-wrap:anywhere}}p{{color:#bbb}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:1rem}}.card{{background:#222;padding:.75rem;border-radius:8px}}
+.card img{{width:100%;height:320px;object-fit:contain;background:#000;cursor:zoom-in}}h2{{font-size:1rem;overflow-wrap:anywhere}}p{{color:#bbb}}
 button{{margin-right:.5rem;padding:.5rem 1rem}}.keep{{outline:3px solid #3c6}}.reject{{opacity:.4;outline:3px solid #d55}}
 .reason{{font-size:.85rem}}.badge{{font-size:.75rem;background:#3c6;color:#111;padding:.1rem .4rem;border-radius:4px}}
-</style></head><body><header><h1>Photo Cull Review</h1><p>{len(cards)} photos, {exported_count} exported. Mark decisions, then download feedback for a future run.</p>
+#viewer{{position:fixed;inset:0;z-index:3;display:flex;flex-direction:column;background:#000}}#viewer[hidden]{{display:none}}
+#viewer-bar{{display:flex;gap:1rem;align-items:center;padding:.5rem;background:#111}}#viewer-name{{flex:1;overflow-wrap:anywhere}}
+#viewer-frame{{flex:1;min-height:0;display:flex;overflow:auto}}#viewer-frame img{{margin:auto;max-width:100%;max-height:100%;cursor:zoom-in}}
+#viewer-frame.zoomed img{{max-width:none;max-height:none;cursor:zoom-out}}
+</style></head><body><header><h1>Photo Cull Review</h1><p>{len(cards)} photos, {exported_count} exported. Select a photo to view it full screen. Mark decisions, then download feedback for a future run.</p>
 <button id="download">Download feedback.csv</button></header><main class="grid">{"".join(cards)}</main>
+<div id="viewer" hidden><div id="viewer-bar"><span id="viewer-name"></span><span>Click to zoom · ← → move · K keep · R reject · Esc close</span><button id="viewer-close">Close</button></div>
+<div id="viewer-frame"><img id="viewer-image" alt=""></div></div>
 <script>
 const decisions={{}};
 const csvCell=value=>'"'+String(value).replaceAll('"','""')+'"';
-document.querySelectorAll('.card button').forEach(button=>button.onclick=()=>{{const card=button.closest('.card');const decision=button.dataset.decision;decisions[card.dataset.path]=decision;card.classList.remove('keep','reject');card.classList.add(decision);}});
+const cards=[...document.querySelectorAll('.card')];
+const viewer=document.querySelector('#viewer'),frame=document.querySelector('#viewer-frame'),large=document.querySelector('#viewer-image'),caption=document.querySelector('#viewer-name');
+let current=0;
+function show(index){{current=(index+cards.length)%cards.length;const card=cards[current],image=card.querySelector('img'),decision=decisions[card.dataset.path];large.src=image.src;large.alt=image.alt;frame.classList.remove('zoomed');caption.textContent=(current+1)+' of '+cards.length+': '+image.alt+(decision?' ('+decision+')':'');viewer.hidden=false;}}
+function closeViewer(){{viewer.hidden=true;cards[current].scrollIntoView({{block:'nearest'}});}}
+function mark(card,decision){{decisions[card.dataset.path]=decision;card.classList.remove('keep','reject');card.classList.add(decision);if(!viewer.hidden&&card===cards[current])show(current);}}
+cards.forEach((card,index)=>card.querySelector('img').onclick=()=>show(index));
+document.querySelectorAll('.card button').forEach(button=>button.onclick=()=>mark(button.closest('.card'),button.dataset.decision));
+// Zoom to the preview's full resolution, centred on the clicked point, to check focus.
+large.onclick=event=>{{const box=large.getBoundingClientRect(),x=(event.clientX-box.left)/box.width,y=(event.clientY-box.top)/box.height;frame.classList.toggle('zoomed');if(frame.classList.contains('zoomed')){{frame.scrollLeft=x*large.naturalWidth-frame.clientWidth/2;frame.scrollTop=y*large.naturalHeight-frame.clientHeight/2;}}}};
+document.querySelector('#viewer-close').onclick=closeViewer;
+document.addEventListener('keydown',event=>{{if(viewer.hidden)return;const key=event.key.toLowerCase();if(key==='escape')closeViewer();else if(key==='arrowright')show(current+1);else if(key==='arrowleft')show(current-1);else if(key==='k')mark(cards[current],'keep');else if(key==='r')mark(cards[current],'reject');else return;event.preventDefault();}});
 document.querySelector('#download').onclick=()=>{{let csv='file_path,decision\\n';for(const [path,decision] of Object.entries(decisions)){{csv+=csvCell(path)+','+decision+'\\n';}}const link=document.createElement('a');link.href=URL.createObjectURL(new Blob([csv],{{type:'text/csv'}}));link.download='feedback.csv';link.click();URL.revokeObjectURL(link.href);}};
 </script></body></html>"""
     atomic_write_text(destination, document)

@@ -275,6 +275,27 @@ class ReviewPageTests(unittest.TestCase):
             self.assertIn('<h2>Feedback keep kept.jpg <span class="badge">Exported</span></h2>', html)
             self.assertIn("2nd of 3 in burst", html)
 
+    def test_page_offers_a_full_window_viewer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            thumbnail = root / "store.jpg"
+            thumbnail.write_bytes(b"jpeg")
+            candidate = {
+                "file_path": str(root / "a.jpg"),
+                "composite_score": 4.0,
+                "aesthetic_score": 6.0,
+                "musiq_score": 70.0,
+                "selection_rank": 1,
+            }
+            page = root / "run" / "review.html"
+
+            generate_contact_sheet(page, [candidate], lambda _source: thumbnail)
+
+            html = page.read_text(encoding="utf-8")
+            self.assertIn('<div id="viewer" hidden>', html)
+            self.assertIn('<img id="viewer-image" alt="">', html)
+            self.assertIn("K keep · R reject", html)
+
 
 if __name__ == "__main__":
     unittest.main()
