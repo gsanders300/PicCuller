@@ -260,7 +260,7 @@ Each run folder contains:
 | --- | --- |
 | `picks/` | Your exported photos with their families. Present only when you export something. |
 | `evaluation.csv` | Every photo's scores, ranks, burst, reason, and each score factor. Open it in a spreadsheet to see why anything ranked where it did. |
-| `review.html` | A thumbnail page of the winners for a web browser, where you can mark keeps and rejects. |
+| `review.html` | A thumbnail page for a web browser that shows each burst whole, where you can mark keeps and rejects. |
 | `feedback.csv` | A decision template listing every photo, with the current selection marked `keep`. |
 | `failures.csv` | Any photo that couldn't be read or scored, and why. Empty when all went well. |
 | `run.json` | A full audit of the run: settings, model versions, counts, and timings. |
@@ -290,6 +290,11 @@ The easiest start is the run's own `feedback.csv`. It lists every photo, with th
 selection already marked `keep`, so change or add decisions and save it. You can also mark photos in `review.html` and select
 `Download feedback.csv`. Select a photo on the page to see it full screen, and click it to
 zoom in on detail such as focus. Then rerun with `--feedback path/to/feedback.csv`.
+
+The page shows each burst whole. The frame Photo Cull chose is labelled `Pick` and the
+frames it beat are labelled `Lost`. If it chose the wrong frame, reject the `Pick` and keep
+the frame you prefer. That pair is the most useful decision you can record. The page shows
+up to `--contact-sheet` photos (100 by default), so raise it to see more bursts.
 
 - `keep` always exports the photo, even one that lost its burst.
 - `reject` never exports it.

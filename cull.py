@@ -596,13 +596,13 @@ def _execute_pipeline(
     outputs = [("evaluation.csv", "score, factors, and reason for every photo")]
     if config.contact_sheet_count > 0:
         audit.set_phase("contact_sheet")
-        review_candidates = candidate_pool[: config.contact_sheet_count]
+        review_groups = _review_groups(candidate_pool, records, config.contact_sheet_count)
         contact_sheet = run_dir / "review.html"
         thumbnail_store = ThumbnailStore(output_root / "thumbnails", folder)
 
         generated, thumbnail_failures = generate_contact_sheet(
             contact_sheet,
-            review_candidates,
+            review_groups,
             thumbnail_store.thumbnail,
             selected_paths,
         )
@@ -614,6 +614,7 @@ def _execute_pipeline(
                 "thumbnail_decode", thumbnail_store.decode_seconds, thumbnail_store.decoded
             )
         audit.data["counts"]["contact_sheet_images"] = generated
+        audit.data["counts"]["contact_sheet_bursts"] = len(review_groups)
         audit.data["counts"]["thumbnails_decoded"] = thumbnail_store.decoded
         audit.data["counts"]["thumbnails_reused"] = generated - thumbnail_store.decoded
         pruned = thumbnail_store.prune()
@@ -1032,6 +1033,52 @@ def _assign_ranks(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for record in records:
         record.setdefault("selection_rank", "")
     return winners
+
+
+def _review_groups(
+    pool: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+    limit: int,
+) -> list[list[dict[str, Any]]]:
+    """Group each review candidate with the burst siblings it beat.
+
+    A winners-only page cannot show the frame a pick beat, so it cannot collect the
+    one comparison that decides a burst. Every group here carries the whole burst,
+    best frame first, which turns a review into a within-burst keep/reject pair.
+
+    `limit` stays a cap on thumbnails, not on bursts, so the decode cost of the page
+    is unchanged. Bursts are added whole and in selection order, and the walk stops
+    at the first burst that does not fit rather than skipping it for a smaller one
+    further down. A single burst larger than the whole limit is truncated, so a
+    positive limit never produces an empty page.
+    """
+    by_burst: dict[int, list[dict[str, Any]]] = {}
+    for record in records:
+        by_burst.setdefault(int(record["burst_id"]), []).append(record)
+
+    groups: list[list[dict[str, Any]]] = []
+    seen: set[int] = set()
+    used = 0
+    for candidate in pool:
+        burst_id = int(candidate["burst_id"])
+        if burst_id in seen:
+            continue
+        seen.add(burst_id)
+        remaining = limit - used
+        if remaining <= 0:
+            break
+        burst = sorted(by_burst[burst_id], key=_burst_display_key)
+        if len(burst) > remaining:
+            if groups:
+                break
+            burst = burst[:remaining]
+        groups.append(burst)
+        used += len(burst)
+    return groups
+
+
+def _burst_display_key(record: dict[str, Any]) -> tuple[int, str]:
+    return int(record["burst_rank"]), str(record["file_path"]).casefold()
 
 
 def _report_row(record: dict[str, Any]) -> dict[str, Any]:

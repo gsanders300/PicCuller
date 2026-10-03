@@ -216,13 +216,58 @@ def link_or_copy(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def _render_card(
+    record: dict[str, Any],
+    thumbnail_name: str,
+    in_burst: bool,
+    exported: bool,
+) -> str:
+    source = Path(record["file_path"])
+    metrics = (
+        f"Score {float(record['composite_score']):.2f} · "
+        f"Aesthetic {float(record['aesthetic_score']):.2f} · "
+        f"MUSIQ {float(record['musiq_score']):.1f}"
+    )
+    rank = record.get("selection_rank", "")
+    winner = bool(record.get("burst_winner", True))
+    if in_burst:
+        badge = (
+            '<span class="badge pick">Pick</span>'
+            if winner
+            else '<span class="badge sibling">Lost</span>'
+        )
+        label = f"{badge}#{escape(str(rank))} " if winner and rank != "" else badge
+        rank_line = f'<p class="rank">Burst rank {escape(str(record.get("burst_rank", "")))}</p>'
+    else:
+        # A forced keep that lost its burst has no winner rank to show.
+        label = f"#{escape(str(rank))} " if rank != "" else "Feedback keep "
+        rank_line = ""
+    exported_badge = ' <span class="badge exported">Exported</span>' if exported else ""
+    return f"""
+            <article class="card{" winner" if in_burst and winner else ""}" data-path="{escape(str(source.resolve()), quote=True)}">
+              <img src="thumbnails/{thumbnail_name}" alt="{escape(source.name, quote=True)}" loading="lazy">
+              <h3>{label}{escape(source.name)}{exported_badge}</h3>{rank_line}
+              <p>{escape(metrics)}</p>
+              <p class="reason">{escape(str(record.get("score_reason", "")))}</p>
+              <div><button data-decision="keep">Keep</button><button data-decision="reject">Reject</button></div>
+            </article>
+            """
+
+
 def generate_contact_sheet(
     destination: Path,
-    candidates: list[dict[str, Any]],
+    groups: list[list[dict[str, Any]]],
     thumbnail_provider: Callable[[Path], Path],
     selected_paths: set[str] | None = None,
 ) -> tuple[int, list[tuple[Path, Exception]]]:
     """Generate a self-contained local review page with downloadable feedback.
+
+    Each group is one burst, best frame first. A burst with more than one frame is
+    drawn as its own block, so a reviewer can reject the frame the program picked
+    and keep the sibling it beat. That pair is the only evidence that can calibrate
+    the within-burst weights, and a winners-only page could never produce it.
+    Consecutive single-frame groups share one grid, so a collection with no bursts,
+    or a `--no-group` run, keeps a dense layout.
 
     `thumbnail_provider` returns a path to a ready thumbnail for a source image.
     Keeping generation behind that callable lets the caller reuse thumbnails
@@ -231,58 +276,75 @@ def generate_contact_sheet(
     selected_paths = selected_paths or set()
     thumbnail_dir = destination.parent / "thumbnails"
     thumbnail_dir.mkdir(parents=True, exist_ok=True)
-    cards: list[str] = []
     failures: list[tuple[Path, Exception]] = []
+    blocks: list[str] = []
+    solo: list[str] = []
+    card_count = 0
+    burst_count = 0
     exported_count = 0
+    index = 0
 
-    for index, candidate in enumerate(candidates, start=1):
-        source = Path(candidate["file_path"])
-        thumbnail_name = f"{index:04d}.jpg"
-        try:
-            link_or_copy(thumbnail_provider(source), thumbnail_dir / thumbnail_name)
-        except Exception as error:
-            failures.append((source, error))
+    def flush_solo() -> None:
+        if solo:
+            blocks.append(f'<div class="grid">{"".join(solo)}</div>')
+            solo.clear()
+
+    for group in groups:
+        in_burst = len(group) > 1
+        cards: list[str] = []
+        for record in group:
+            index += 1
+            thumbnail_name = f"{index:04d}.jpg"
+            source = Path(record["file_path"])
+            try:
+                link_or_copy(thumbnail_provider(source), thumbnail_dir / thumbnail_name)
+            except Exception as error:
+                failures.append((source, error))
+                continue
+            exported = str(source.resolve()) in selected_paths
+            exported_count += exported
+            cards.append(_render_card(record, thumbnail_name, in_burst, exported))
+
+        if not cards:
             continue
+        card_count += len(cards)
+        if in_burst:
+            flush_solo()
+            burst_count += 1
+            heading = f"Burst {group[0].get('burst_id', '')} · {len(group)} frames"
+            blocks.append(
+                f'<section class="burst"><h2>{escape(heading)}</h2>'
+                f'<div class="grid">{"".join(cards)}</div></section>'
+            )
+        else:
+            solo.extend(cards)
+    flush_solo()
 
-        path_text = str(source.resolve())
-        metrics = (
-            f"Score {float(candidate['composite_score']):.2f} · "
-            f"Aesthetic {float(candidate['aesthetic_score']):.2f} · "
-            f"MUSIQ {float(candidate['musiq_score']):.1f}"
-        )
-        rank = candidate.get("selection_rank", "")
-        # A forced keep that lost its burst has no winner rank to show.
-        label = f"#{rank}" if rank != "" else "Feedback keep"
-        exported = path_text in selected_paths
-        exported_count += exported
-        badge = ' <span class="badge">Exported</span>' if exported else ""
-        cards.append(
-            f"""
-            <article class="card" data-path="{escape(path_text, quote=True)}">
-              <img src="thumbnails/{thumbnail_name}" alt="{escape(source.name, quote=True)}" loading="lazy">
-              <h2>{escape(label)} {escape(source.name)}{badge}</h2>
-              <p>{escape(metrics)}</p>
-              <p class="reason">{escape(str(candidate.get("score_reason", "")))}</p>
-              <div><button data-decision="keep">Keep</button><button data-decision="reject">Reject</button></div>
-            </article>
-            """
-        )
-
+    summary = f"{card_count} photos"
+    if burst_count:
+        summary += f", including {burst_count} complete bursts"
+    summary += f", {exported_count} exported."
+    if burst_count:
+        summary += " In a burst, reject the Pick and keep the frame you prefer if Photo Cull chose wrong."
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Photo Cull Review</title>
 <style>
 body{{font:15px system-ui;background:#111;color:#eee;margin:1rem}}header{{position:sticky;top:0;background:#111;padding:.5rem;z-index:2}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:1rem}}.card{{background:#222;padding:.75rem;border-radius:8px}}
-.card img{{width:100%;height:320px;object-fit:contain;background:#000;cursor:zoom-in}}h2{{font-size:1rem;overflow-wrap:anywhere}}p{{color:#bbb}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:1rem;margin-bottom:1rem}}.card{{background:#222;padding:.75rem;border-radius:8px}}
+.card img{{width:100%;height:320px;object-fit:contain;background:#000;cursor:zoom-in}}h3{{font-size:1rem;overflow-wrap:anywhere}}p{{color:#bbb}}
+.burst{{border:1px solid #444;border-radius:8px;padding:.75rem;margin-bottom:1rem;background:#191919}}
+.burst h2{{font-size:.95rem;margin:.15rem 0 .6rem;color:#9cf}}.burst .grid{{margin-bottom:0}}
+.rank{{font-size:.8rem;margin:.1rem 0}}.card.winner{{outline:1px solid #3c6}}
 button{{margin-right:.5rem;padding:.5rem 1rem}}.keep{{outline:3px solid #3c6}}.reject{{opacity:.4;outline:3px solid #d55}}
-.reason{{font-size:.85rem}}.badge{{font-size:.75rem;background:#3c6;color:#111;padding:.1rem .4rem;border-radius:4px}}
+.reason{{font-size:.85rem}}.badge{{display:inline-block;font-size:.75rem;padding:.1rem .4rem;border-radius:4px;margin-right:.35rem;vertical-align:middle}}
+.badge.pick,.badge.exported{{background:#3c6;color:#111}}.badge.sibling{{background:#555;color:#eee}}
 #viewer{{position:fixed;inset:0;z-index:3;display:flex;flex-direction:column;background:#000}}#viewer[hidden]{{display:none}}
 #viewer-bar{{display:flex;gap:1rem;align-items:center;padding:.5rem;background:#111}}#viewer-name{{flex:1;overflow-wrap:anywhere}}
 #viewer-frame{{flex:1;min-height:0;display:flex;overflow:auto}}#viewer-frame img{{margin:auto;max-width:100%;max-height:100%;cursor:zoom-in}}
 #viewer-frame.zoomed img{{max-width:none;max-height:none;cursor:zoom-out}}
-</style></head><body><header><h1>Photo Cull Review</h1><p>{len(cards)} photos, {exported_count} exported. Select a photo to view it full screen. Mark decisions, then download feedback for a future run.</p>
-<button id="download">Download feedback.csv</button></header><main class="grid">{"".join(cards)}</main>
+</style></head><body><header><h1>Photo Cull Review</h1><p>{escape(summary)} Select a photo to view it full screen. Mark decisions, then download feedback for a future run.</p>
+<button id="download">Download feedback.csv</button></header><main>{"".join(blocks)}</main>
 <div id="viewer" hidden><div id="viewer-bar"><span id="viewer-name"></span><span>Click to zoom · ← → move · K keep · R reject · Esc close</span><button id="viewer-close">Close</button></div>
 <div id="viewer-frame"><img id="viewer-image" alt=""></div></div>
 <script>
@@ -291,7 +353,7 @@ const csvCell=value=>'"'+String(value).replaceAll('"','""')+'"';
 const cards=[...document.querySelectorAll('.card')];
 const viewer=document.querySelector('#viewer'),frame=document.querySelector('#viewer-frame'),large=document.querySelector('#viewer-image'),caption=document.querySelector('#viewer-name');
 let current=0;
-function show(index){{current=(index+cards.length)%cards.length;const card=cards[current],image=card.querySelector('img'),decision=decisions[card.dataset.path];large.src=image.src;large.alt=image.alt;frame.classList.remove('zoomed');caption.textContent=(current+1)+' of '+cards.length+': '+image.alt+(decision?' ('+decision+')':'');viewer.hidden=false;}}
+function show(index){{current=(index+cards.length)%cards.length;const card=cards[current],image=card.querySelector('img'),decision=decisions[card.dataset.path],tag=card.querySelector('.pick,.sibling');large.src=image.src;large.alt=image.alt;frame.classList.remove('zoomed');caption.textContent=(current+1)+' of '+cards.length+': '+(tag?tag.textContent+' · ':'')+image.alt+(decision?' ('+decision+')':'');viewer.hidden=false;}}
 function closeViewer(){{viewer.hidden=true;cards[current].scrollIntoView({{block:'nearest'}});}}
 function mark(card,decision){{decisions[card.dataset.path]=decision;card.classList.remove('keep','reject');card.classList.add(decision);if(!viewer.hidden&&card===cards[current])show(current);}}
 cards.forEach((card,index)=>card.querySelector('img').onclick=()=>show(index));
@@ -303,4 +365,4 @@ document.addEventListener('keydown',event=>{{if(viewer.hidden)return;const key=e
 document.querySelector('#download').onclick=()=>{{let csv='file_path,decision\\n';for(const [path,decision] of Object.entries(decisions)){{csv+=csvCell(path)+','+decision+'\\n';}}const link=document.createElement('a');link.href=URL.createObjectURL(new Blob([csv],{{type:'text/csv'}}));link.download='feedback.csv';link.click();URL.revokeObjectURL(link.href);}};
 </script></body></html>"""
     atomic_write_text(destination, document)
-    return len(cards), failures
+    return card_count, failures

@@ -131,7 +131,7 @@ and does not cache the evaluations it makes during the fallback.
 | `--select N\|all\|none` | Prompt, or `none` without a terminal | How many photos to export. `N` runs from 1 to the number of burst winners. The format is checked before evaluation starts; the count is checked against the winners after ranking. |
 | `--diversity NUMBER` | `0.0` | Preference for photos that look different, from 0 to 1. See [Diversity](#diversity). |
 | `--feedback PATH` | None | Apply `keep` and `reject` decisions from a CSV file. |
-| `--contact-sheet INTEGER` | `100` | Maximum thumbnails on the review page. `0` skips the page. |
+| `--contact-sheet INTEGER` | `100` | Maximum thumbnails on the review page. The page shows complete bursts, so this limits photos, not bursts. `0` skips the page. |
 | `--write-xmp` | Off | Write ratings into XMP sidecars beside the exported copies. |
 | `--aesthetic-head PATH` | The pinned default head | Use compatible personal aesthetic-head weights. |
 
@@ -359,6 +359,95 @@ reject decisions. Sharpness compared with the whole run agreed with them least o
 measures, because a photo with little fine detail reads as soft even when it is in focus.
 The value stays provisional until more shoots confirm it.
 
+### Scoring presets in detail
+
+A preset changes the composite score only. It does not change discovery, primary-image
+selection, burst membership, or the export rules.
+
+| Preset | Added measurement | Cost of a change to this preset on an evaluated collection |
+| --- | --- | --- |
+| `balanced` | None | No model. Photo Cull scores the cached metrics again. |
+| `wildlife` | CLIP subject integrity | The CLIP text model only. No decode and no MUSIQ. |
+| `landscape` | CLIP subject integrity | The CLIP text model only. No decode and no MUSIQ. |
+| `portrait` | CLIP subject integrity, and OpenCV face and eye detection | A full evaluation, because face detection needs the decoded pixels. |
+
+See [Comparing presets without re-evaluating](#comparing-presets-without-re-evaluating).
+
+#### The `balanced` preset
+
+Use this preset for a collection with more than one genre, or when you don't know the genre.
+
+It defines no subject prompts, so its subject score is the constant 1.0 and has no effect.
+Its absolute focus weight is 0.5, so the softest photo in a run loses about 29 percent of its
+score for sharpness compared with the whole run. See the note under the profile table.
+
+#### The `wildlife` preset
+
+Use this preset for animals and birds, and for any subject you follow with a burst.
+
+The subject prompts are:
+
+~~~text
+positive: a wildlife photograph with the complete animal clearly in frame
+negative: a wildlife photograph where the animal is cut off or leaving the frame
+~~~
+
+The relative focus exponent is 1.8, the highest of the four presets, so the comparison within
+a burst counts most. Across a burst of a moving animal, the useful question is which frame
+caught it best. With a focus floor of 0.55 and an absolute focus weight of 0.8, the softest
+photo in a run loses about 38 percent, more than in `balanced`. The exposure weight of 0.8 is
+a little more forgiving than in `balanced`.
+
+Set `--diversity` separately. Diversity is not part of this preset.
+
+#### The `portrait` preset
+
+Use this preset for photographs of people.
+
+The subject prompts are:
+
+~~~text
+positive: a well composed portrait with a clear face and open eyes
+negative: a portrait with a hidden face, closed eyes, or awkward crop
+~~~
+
+This preset also runs the OpenCV face and eye cascades. See [Neural scores](#neural-scores)
+for the eye check and its limits.
+
+With a focus floor of 0.60 and an absolute focus weight of 0.7, the softest photo in a run
+loses about 30 percent, about the same as in `balanced`. A portrait usually has a shallow
+depth of field, so a large part of the frame is correctly soft. The eye weight of 0.35 is the
+only non-zero eye weight.
+
+A change to this preset on an evaluated collection decodes the images again, because face
+detection needs the pixels. The other three presets don't.
+
+#### The `landscape` preset
+
+Use this preset for a scene that must be sharp from the front to the back.
+
+The subject prompts are:
+
+~~~text
+positive: a compelling well composed landscape photograph
+negative: a poorly composed accidental landscape snapshot
+~~~
+
+With a focus floor of 0.45 and an absolute focus weight of 1.2, the softest photo in a run
+loses about 62 percent, the largest penalty of the four presets. The exposure weight of 1.2
+and the MUSIQ weight of 1.1 also strengthen those two terms. The relative focus exponent of
+1.2 is the lowest of the four presets, because a landscape is usually one frame, not a burst.
+
+#### Limits of the subject prompts
+
+The two prompts of a pair are close together in CLIP space. Their measured cosine similarity
+is 0.859 for `wildlife`, 0.773 for `landscape`, and 0.729 for `portrait`. Most of the content
+of a photograph agrees with both prompts, so the comparison rests on a small difference.
+Don't expect a large effect from this term.
+
+All preset weights are provisional. Validate a preset against your own decisions before you
+trust it. See [Validate the ranking](#validate-the-ranking).
+
 ### Composite score
 
 ~~~text
@@ -580,9 +669,24 @@ contract and remaining platform gaps are in section 7 of
 `review.html` opens in any web browser. It uses local thumbnails and sends nothing to any
 service.
 
-Each card shows the selection rank, file name, score, and score reason. A forced keep that
-did not win its burst shows `Feedback keep` instead of a rank, and an `Exported` badge marks
-each photo in the current selection.
+Each card shows the file name, score, and score reason, and a burst winner shows its
+selection rank. An `Exported` badge marks each photo in the current selection.
+
+The page shows complete bursts, not only the winners. A burst with more than one photo gets
+its own block. The photo that Photo Cull chose has a green `Pick` label, and each photo it
+beat has a grey `Lost` label and its burst rank. Photos with no burst share one grid.
+
+To disagree with a burst result, mark the `Pick` photo `Reject` and the photo you prefer
+`Keep`. This pair is the most useful record you can make. It compares two frames of one
+subject in one light, so it isolates what the burst rules and the sharpness weights control.
+A page of winners alone can't record it.
+
+`--contact-sheet` limits photos, not bursts. Photo Cull adds bursts whole, in selection
+order, until the next burst doesn't fit. It doesn't skip that burst to show a smaller one,
+because that would drop a higher-ranked burst from the page. If the first burst alone is
+larger than the limit, the page shows its first part, so a positive value always gives a
+page. Raise `--contact-sheet` to see more bursts. Previews are shared between runs, so only
+new ones take time.
 
 Select a photo to open it full screen. Click the large photo to zoom to the preview's full
 resolution around that point, and click again to fit it to the window. In the full-screen
@@ -631,7 +735,7 @@ The run audit, updated throughout the run. Its final status is `completed`, `fai
 - Python, platform, and package versions
 - counts: discovered, cached, evaluated, preset-refreshed, failed, winners, selected, and
   exported
-- contact-sheet counts: images, thumbnails decoded, reused, and pruned
+- contact-sheet counts: images, bursts, thumbnails decoded, reused, and pruned
 - phase times, and per-stage times with an image count for each stage
 - paths to generated outputs
 

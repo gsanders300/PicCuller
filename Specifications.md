@@ -634,16 +634,29 @@ therefore proportional to picks times candidates rather than to the square of th
 1. `review.html` contains local thumbnails, scores, score reasons, keep/reject controls,
    a full-screen viewer with zoom and keyboard marking, and a browser-side feedback CSV
    download.
-2. It shows the first `--contact-sheet` candidates from the pool: burst winners in
-   selection-rank order, then keeps that are not winners.
-3. Each card is labelled with its selection rank, or `Feedback keep` for a forced keep
-   that is not a burst winner. An `Exported` badge marks the current selection. The page
-   is written after selection, so the badge is exact.
-4. Thumbnails come from a shared content-addressed store at `OUTPUT_ROOT/thumbnails/`,
+2. It shows complete bursts, not burst winners alone. Groups follow the candidate pool:
+   burst winners in selection-rank order, then the bursts of keeps that are not winners,
+   each burst once. A group holds the whole burst ordered by `burst_rank`.
+3. `--contact-sheet` caps thumbnails, not bursts, so page decode cost is unchanged. Bursts
+   are added whole, and the walk stops at the first burst that does not fit rather than
+   skipping it for a smaller one, which would silently remove a higher-ranked burst. A
+   single burst larger than the whole cap is truncated, so a positive cap never yields an
+   empty page. `run.json` records `contact_sheet_images` and `contact_sheet_bursts`.
+4. A burst with more than one frame is drawn as its own block, with the winner labelled
+   `Pick` and the frames it beat labelled `Lost`. Consecutive single-frame groups share one
+   grid, so a `--no-group` run keeps a dense layout. A winner's card shows its selection
+   rank, a single-frame forced keep shows `Feedback keep`, and an `Exported` badge marks
+   the current selection. The page is written after selection, so the badge is exact.
+5. Thumbnails come from a shared content-addressed store at `OUTPUT_ROOT/thumbnails/`,
    keyed by collection-relative path, size, modification time, and review dimension
    (2048 pixels). They are published into each run directory as hard links, falling back
    to a copy.
-5. The store is bounded to its 2000 most recent entries.
+6. The store is bounded to its 2000 most recent entries.
+
+**Why whole bursts:** A winners-only page cannot express "the program picked the wrong
+frame of this burst", so it cannot produce a within-burst keep/reject pair. That pair is
+the only observation that isolates the relative-focus exponent and the other per-burst
+weights from scene content.
 
 **Why a shared store:** A repeat run over unchanged photographs therefore decodes nothing.
 Previously the review page re-decoded up to `--contact-sheet` sources on every run, which

@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -275,10 +276,10 @@ class PipelineIntegrationTests(unittest.TestCase):
             self.assertEqual(run_with_mocks(build_config(source, output, selection="1")), 0)
 
             page = (latest_run(output) / "review.html").read_text(encoding="utf-8")
-            self.assertEqual(page.count('<span class="badge">Exported</span>'), 1)
+            self.assertEqual(page.count('<span class="badge exported">Exported</span>'), 1)
             self.assertIn("2 photos, 1 exported", page)
             self.assertIn('<p class="reason">', page)
-            self.assertNotIn("<h2># ", page)
+            self.assertNotIn("<h3># ", page)
 
 
 class StageInstrumentationTests(unittest.TestCase):
@@ -546,6 +547,44 @@ class ThumbnailReuseTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertIn("contact_sheet", stages)
             self.assertEqual(read_manifest(run_dir)["counts"]["contact_sheet_images"], 0)
+
+
+class ReviewPageBurstTests(unittest.TestCase):
+    """The rest of this file runs `no_group`, so the burst layout needs its own run."""
+
+    def test_the_page_carries_the_frames_a_winner_beat(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            source.mkdir(parents=True)
+            for index, colour in enumerate(("red", "blue", "green")):
+                photo = source / f"frame{index}.jpg"
+                Image.new("RGB", (64, 48), colour).save(photo)
+                # One second apart, inside the two-second burst window. Flat frames
+                # share a pHash, so the burst rule that groups them is the pHash one.
+                os.utime(photo, (1_700_000_000 + index, 1_700_000_000 + index))
+
+            config = build_config(
+                source, output, no_group=False, selection="none", contact_sheet_count=10
+            )
+            exit_code = run_with_mocks(config)
+
+            run_dir = latest_run(output)
+            counts = read_manifest(run_dir)["counts"]
+            page = (run_dir / "review.html").read_text(encoding="utf-8")
+            rows = read_rows(run_dir / "evaluation.csv")
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual({row["burst_id"] for row in rows}, {"1"}, "expected one burst")
+            self.assertEqual(counts["contact_sheet_bursts"], 1)
+            self.assertEqual(counts["contact_sheet_images"], 3)
+            # A winners-only page would show one frame and no burst block.
+            self.assertEqual(page.count('<section class="burst">'), 1)
+            self.assertEqual(page.count('class="badge pick">Pick'), 1)
+            self.assertEqual(page.count('class="badge sibling">Lost'), 2)
+            for index in range(3):
+                self.assertIn(f"frame{index}.jpg", page)
 
 
 class PresetSwitchTests(unittest.TestCase):

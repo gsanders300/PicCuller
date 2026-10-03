@@ -266,13 +266,15 @@ class ReviewPageTests(unittest.TestCase):
             page = root / "run" / "review.html"
 
             generated, failures = generate_contact_sheet(
-                page, [winner, kept], lambda _source: thumbnail, {kept["file_path"]}
+                page, [[winner], [kept]], lambda _source: thumbnail, {kept["file_path"]}
             )
 
             html = page.read_text(encoding="utf-8")
             self.assertEqual((generated, failures), (2, []))
-            self.assertIn("<h2>#1 winner.jpg</h2>", html)
-            self.assertIn('<h2>Feedback keep kept.jpg <span class="badge">Exported</span></h2>', html)
+            self.assertIn("<h3>#1 winner.jpg</h3>", html)
+            self.assertIn(
+                '<h3>Feedback keep kept.jpg <span class="badge exported">Exported</span></h3>', html
+            )
             self.assertIn("2nd of 3 in burst", html)
 
     def test_page_offers_a_full_window_viewer(self) -> None:
@@ -289,7 +291,7 @@ class ReviewPageTests(unittest.TestCase):
             }
             page = root / "run" / "review.html"
 
-            generate_contact_sheet(page, [candidate], lambda _source: thumbnail)
+            generate_contact_sheet(page, [[candidate]], lambda _source: thumbnail)
 
             html = page.read_text(encoding="utf-8")
             self.assertIn('<div id="viewer" hidden>', html)
