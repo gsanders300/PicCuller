@@ -314,8 +314,10 @@ The weights differ by preset, which is how presets express different priorities:
 - **Wildlife** leans harder on relative sharpness within the burst. Across a burst of a
   moving animal, the real question is which frame caught it best.
 
-One honest caveat: these weights were chosen by judgment, not derived from data. Nobody has
-yet tuned them against a large set of your own keep and reject decisions. Treat the scores
+One honest caveat: these weights were chosen by judgment, not derived from data. The one
+exception so far is the balanced preset's sharpness-percentile weight, which was halved after a
+single shoot's keep and reject decisions. Nobody has yet tuned the weights against a large set
+of your own decisions. Treat the scores
 as a useful ordering, not as truth.
 
 ## Step 11: Three different rankings

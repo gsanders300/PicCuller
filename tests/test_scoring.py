@@ -50,7 +50,8 @@ class ScoringTests(unittest.TestCase):
         sharp_score = calculate_composite_score(records[1])
 
         self.assertLess(blurred_score, sharp_score)
-        self.assertAlmostEqual(sharp_score / blurred_score, 4.0 / 3.0)
+        # Factors 1.0 and 0.75, under the balanced absolute focus weight of 0.5.
+        self.assertAlmostEqual(sharp_score / blurred_score, (4.0 / 3.0) ** 0.5)
 
     def test_equal_focus_scores_receive_equal_percentiles(self) -> None:
         records = [record("a.jpg", 10.0), record("b.jpg", 10.0)]
@@ -213,7 +214,7 @@ class ScoreReasonTests(unittest.TestCase):
 
         self.assertTrue(
             reasons["0.jpg"]["score_reason"].startswith(
-                "best of 3 in burst; next best 1.jpg scored 40% lower, mainly on sharpness"
+                "best of 3 in burst; next best 1.jpg scored 35% lower, mainly on sharpness"
             )
         )
 
@@ -222,7 +223,7 @@ class ScoreReasonTests(unittest.TestCase):
 
         self.assertTrue(
             reasons["2.jpg"]["score_reason"].startswith(
-                "3rd of 3 in burst; scored 94% lower than 0.jpg, mainly on sharpness"
+                "3rd of 3 in burst; scored 93% lower than 0.jpg, mainly on sharpness"
             )
         )
 

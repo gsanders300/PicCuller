@@ -349,10 +349,15 @@ and 1, raised to a per-preset weight. A higher weight makes that factor matter m
 
 | Profile | Focus floor | Absolute focus weight | Relative focus exponent | MUSIQ weight | Exposure weight | Eye weight | Subject weight |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `balanced` | 0.50 | 1.0 | 1.5 | 1.0 | 1.0 | 0.0 | 0.0 |
+| `balanced` | 0.50 | 0.5 | 1.5 | 1.0 | 1.0 | 0.0 | 0.0 |
 | `wildlife` | 0.55 | 0.8 | 1.8 | 1.0 | 0.8 | 0.0 | 0.2 |
 | `portrait` | 0.60 | 0.7 | 1.6 | 1.0 | 0.8 | 0.35 | 0.15 |
 | `landscape` | 0.45 | 1.2 | 1.2 | 1.1 | 1.2 | 0.0 | 0.15 |
+
+The `balanced` absolute focus weight was lowered from 1.0 to 0.5 after one shoot's keep and
+reject decisions. Sharpness compared with the whole run agreed with them least of all the
+measures, because a photo with little fine detail reads as soft even when it is in focus.
+The value stays provisional until more shoots confirm it.
 
 ### Composite score
 

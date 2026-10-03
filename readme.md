@@ -209,7 +209,7 @@ from a model trained on human ratings of visual appeal. It is then multiplied by
 between 0 and 1:
 
 - **Sharpness compared with the whole run:** with the default preset, the blurriest photos
-  lose up to half their score.
+  lose up to about 30 percent of their score.
 - **Sharpness compared with the rest of the burst:** with the default preset, a frame half
   as sharp as the burst's sharpest loses about two thirds of its score.
 - **Technical quality** from the MUSIQ model, which predicts how people rate problems such
@@ -232,8 +232,8 @@ one that looks too much like a photo already chosen.
 | Preset | Use it for | What changes |
 | --- | --- | --- |
 | `balanced` | General shooting (default) | Standard weights. |
-| `wildlife` | Animals and action | Harsher on frames softer than the burst's best; a little more forgiving of exposure; checks the animal is fully in frame. |
-| `portrait` | People | Penalizes likely closed or hidden eyes; more forgiving of overall softness; checks for a clear face. |
+| `wildlife` | Animals and action | Harsher on soft frames, both within the burst and across the run; a little more forgiving of exposure; checks the animal is fully in frame. |
+| `portrait` | People | Penalizes likely closed or hidden eyes; checks for a clear face. |
 | `landscape` | Scenery | More weight on overall sharpness, exposure, and technical quality; gentler within bursts; checks composition. |
 
 ### Read the reasons

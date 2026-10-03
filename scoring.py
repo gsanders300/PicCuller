@@ -30,7 +30,11 @@ class ScoringProfile:
 
 
 SCORING_PROFILES = {
-    "balanced": ScoringProfile(name="balanced"),
+    # Halved from 1.0 after one shoot's keep/reject feedback (73 keeps, 13 rejects):
+    # whole-run sharpness was the weakest predictor and pushed liked photos with
+    # little fine detail down. Keep/reject agreement rose from 74% to 79%, and the
+    # top 20 still held 19 keeps. Still provisional until more shoots confirm it.
+    "balanced": ScoringProfile(name="balanced", absolute_focus_weight=0.5),
     "wildlife": ScoringProfile(
         name="wildlife",
         absolute_focus_floor=0.55,
