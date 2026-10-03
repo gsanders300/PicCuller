@@ -3,6 +3,15 @@
 Each release lists what changed for people who use Photo Cull. The release workflow
 publishes the section that matches the tag, so every tagged version needs a section here.
 
+## [1.0.1] - 2026-10-03
+
+A maintenance release with no change to how Photo Cull works.
+
+### Changed
+
+- The CI and release workflows use `actions/checkout` v7 and `astral-sh/setup-uv` v10.2.0,
+  which run on Node.js 24, because GitHub is retiring Node.js 20 for actions.
+
 ## [1.0.0] - 2026-10-03
 
 The first stable release. The code is the same as 0.4.0; only the version number, the package
@@ -53,5 +62,6 @@ The first public release. Earlier versions were developed without tagged release
 - Three tests left a file open, which failed every Windows CI run. Tests now fail on any
   platform when a file is left open.
 
+[1.0.1]: https://github.com/gsanders300/PicCuller/releases/tag/v1.0.1
 [1.0.0]: https://github.com/gsanders300/PicCuller/releases/tag/v1.0.0
 [0.4.0]: https://github.com/gsanders300/PicCuller/releases/tag/v0.4.0
