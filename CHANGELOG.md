@@ -3,6 +3,22 @@
 Each release lists what changed for people who use Photo Cull. The release workflow
 publishes the section that matches the tag, so every tagged version needs a section here.
 
+## [1.0.0] - 2026-10-03
+
+The first stable release. The code is the same as 0.4.0; only the version number, the package
+status, and the project status in the README change. See 0.4.0 below for what changed since
+earlier development.
+
+Photo Cull 1.0:
+
+- groups bursts of near-identical frames and keeps the best frame of each
+- scores every photo for sharpness, exposure, technical quality, and visual appeal, and
+  explains each score in plain words
+- reads 18 RAW formats plus JPEG, PNG, TIFF, WebP, and BMP, and never modifies the originals
+- exports whole asset families, with optional XMP star ratings on the copies only
+- offers a review page with whole bursts, a full-screen viewer, and saved decisions
+- runs on Apple silicon, NVIDIA GPUs, or the CPU, entirely on your computer
+
 ## [0.4.0] - 2026-10-03
 
 The first public release. Earlier versions were developed without tagged releases.
@@ -37,4 +53,5 @@ The first public release. Earlier versions were developed without tagged release
 - Three tests left a file open, which failed every Windows CI run. Tests now fail on any
   platform when a file is left open.
 
+[1.0.0]: https://github.com/gsanders300/PicCuller/releases/tag/v1.0.0
 [0.4.0]: https://github.com/gsanders300/PicCuller/releases/tag/v0.4.0

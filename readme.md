@@ -477,8 +477,8 @@ depends on them. Check each license before you use Photo Cull commercially.
 
 ## Project status
 
-Photo Cull is beta software. Continuous integration tests it on macOS and Windows, but these
-areas aren't fully validated yet:
+Version 1.0 is the first stable release. Continuous integration tests it on macOS and
+Windows, but these areas aren't fully validated yet:
 
 - representative sessions on Apple silicon (MPS) and on Windows with CUDA
 - camera-specific autofocus-point mapping
