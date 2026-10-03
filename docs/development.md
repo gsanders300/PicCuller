@@ -89,6 +89,33 @@ that describes it in the same change.
 | [Specifications.md](../Specifications.md) | Developers: the formal contract the code must meet | Scoring, grouping, cache, terminal, or export requirements change |
 | [docs/how-a-photograph-is-judged.md](how-a-photograph-is-judged.md) | Readers who want the reasoning, as narrative prose | A step's behavior or rationale changes |
 | [PotentialEnhancements.md](../PotentialEnhancements.md) | Known limits and deferred work | Work is done, deferred, or ruled out |
+| [CHANGELOG.md](../CHANGELOG.md) | Users: what changed in each release | A change that users will notice lands |
 
 The user documents use plain technical English: short sentences, active voice, and the
 reader addressed as "you".
+
+## Release a version
+
+The release workflow publishes a GitHub release whenever a `v*` tag is pushed. It stops if
+the tag doesn't match the version in `pyproject.toml`, or if `CHANGELOG.md` has no section for
+that version.
+
+1. Set the new version in `pyproject.toml`.
+2. Update the lock file with the `uv` version that CI pins in
+   `.github/workflows/ci.yml`, so only the project's version line changes:
+
+   ~~~text
+   uvx --from uv==0.9.18 uv lock
+   ~~~
+
+3. Add a `## [X.Y.Z] - YYYY-MM-DD` section and its link to `CHANGELOG.md`.
+4. Merge to `main` and wait for CI to pass on macOS and Windows.
+5. Tag the merged commit and push the tag:
+
+   ~~~text
+   git tag -a vX.Y.Z -m "Photo Cull vX.Y.Z"
+   git push origin vX.Y.Z
+   ~~~
+
+The workflow attaches the source distribution and wheel to the release, with that version's
+changelog section as the notes.
