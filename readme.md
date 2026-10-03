@@ -1,5 +1,13 @@
 # Photo Cull
 
+[![CI](https://github.com/gsanders300/PicCuller/actions/workflows/ci.yml/badge.svg)](https://github.com/gsanders300/PicCuller/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/gsanders300/PicCuller)](https://github.com/gsanders300/PicCuller/releases)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)](docs/reference.md#system-requirements)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 Photo Cull helps you pick the best photos from a large shoot. It groups each burst of
 near-identical frames, scores every photo for sharpness, exposure, technical quality, and
 visual appeal, keeps the best frame of each burst, and copies the photos you choose into a
@@ -14,6 +22,8 @@ This guide covers everyday use. For every option, rule, and output column, see t
 
 ## Contents
 
+- [Features](#features)
+- [How it works](#how-it-works)
 - [Quick start](#quick-start)
 - [Everyday tasks](#everyday-tasks)
 - [How photos are chosen](#how-photos-are-chosen)
@@ -21,7 +31,49 @@ This guide covers everyday use. For every option, rule, and output column, see t
 - [Improve the ranking with your decisions](#improve-the-ranking-with-your-decisions)
 - [Stop and resume](#stop-and-resume)
 - [Troubleshooting](#troubleshooting)
+- [Privacy](#privacy)
+- [Models and licenses](#models-and-licenses)
+- [Project status](#project-status)
+- [Contributing](#contributing)
+- [License](#license)
 - [More documentation](#more-documentation)
+
+## Features
+
+- **Groups bursts** by capture time, camera, and visual similarity, and keeps the best frame
+  of each.
+- **Scores every photo** for sharpness, exposure, technical quality (MUSIQ), and visual appeal
+  (an aesthetic model built on CLIP).
+- **Explains every score** in plain words, in the terminal and in `evaluation.csv`.
+- **Reads RAW and standard files:** 18 RAW formats, including ARW, CR3, NEF, DNG, and RAF,
+  plus JPEG, PNG, TIFF, WebP, and BMP.
+- **Exports whole families:** a pick brings its RAW file, matching JPEG, and sidecars, and an
+  export never overwrites anything.
+- **Learns from your decisions:** a review page for marking keeps and rejects, feedback that
+  forces or blocks picks, and a validator that measures how well the ranking matches you.
+- **Reruns fast:** an evaluation cache lets you resume after Ctrl+C, change burst settings, or
+  compare presets without scoring every photo again.
+- **Uses your hardware:** Apple silicon (MPS), NVIDIA (CUDA), or the CPU alone.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Photo folder] --> B[Find photos and<br/>pair RAW with JPEG]
+    B --> C[Read capture time<br/>and camera]
+    C --> D[Decode a preview]
+    D --> E[Measure sharpness, exposure,<br/>MUSIQ, and aesthetic appeal]
+    E --> F[Group bursts]
+    F --> G[Rank and explain]
+    G --> H[review.html]
+    G --> I[evaluation.csv]
+    G --> J[picks/ export]
+    E -.-> K[(Evaluation cache)]
+```
+
+Evaluation decodes each photo once, from its embedded preview when it's a RAW file. The
+scores are cached, so later runs only rank and regroup. [How photos are chosen](#how-photos-are-chosen)
+explains the scoring.
 
 ## Quick start
 
@@ -32,26 +84,30 @@ also work on the CPU alone, just more slowly. See
 [System requirements](docs/reference.md#system-requirements) for details.
 
 1. Install [`uv`](https://docs.astral.sh/uv/). It manages Python 3.12 and every dependency.
-2. Clone this repository and open a terminal in it.
-3. Install the locked environment:
+2. Clone this repository and install the locked environment:
 
    ~~~text
+   git clone https://github.com/gsanders300/PicCuller.git
+   cd PicCuller
    uv sync --locked
    ~~~
 
-4. Optional but recommended: install [ExifTool](https://exiftool.org/) and make sure the
-   `exiftool` command is on your `PATH` (on macOS with Homebrew: `brew install exiftool`).
-   It reads RAW capture times and camera details more reliably, which makes burst grouping
-   more accurate.
+3. Optional but recommended: install [ExifTool](https://exiftool.org/) and make sure the
+   `exiftool` command is on your `PATH`. On macOS with Homebrew, run `brew install exiftool`.
+   On Windows, download the Windows executable, rename `exiftool(-k).exe` to
+   `exiftool.exe`, and put its folder on your `PATH`. ExifTool reads RAW capture times and
+   camera details more reliably, which makes burst grouping more accurate.
 
-The first run needs an internet connection to download the scoring models. Later runs work
-offline.
+The first run needs an internet connection to download about 1.8 GB of scoring models. Later
+runs work offline.
 
 ### 2. Run it on a folder
 
 ~~~text
 uv run photo-cull /path/to/photos
 ~~~
+
+On Windows, give a Windows path, such as `uv run photo-cull C:\Users\you\Pictures\Shoot`.
 
 Photo Cull scans the folder and its subfolders, evaluates each photo, and groups bursts.
 Then it shows the best burst winners, each with a plain-language reason:
@@ -248,9 +304,10 @@ photo, including frames that lost their burst:
 A reason can say how the photo did in its burst, where it stands among all photos (only when
 in the top or bottom quarter), and any penalty of 5 percent or more.
 
-Keep two limits in mind. The weights are informed guesses that haven't yet been tuned against
-real keep-and-reject decisions. And sharpness is judged against the other photos in the same
-run, so the same photo can score differently in a different folder.
+Keep two limits in mind. Most weights are informed guesses. Only the `balanced` preset's
+weight for sharpness compared with the whole run has been tuned, against one shoot's
+keep-and-reject decisions. And sharpness is judged against the other photos in the same run,
+so the same photo can score differently in a different folder.
 
 ## What a run produces
 
@@ -394,6 +451,62 @@ Cull already protects cells that a spreadsheet could run as formulas.
 6. Keep the original reports for comparison.
 
 One small collection isn't enough to judge the tool.
+
+## Privacy
+
+Photo Cull runs on your computer. Your photos never leave it, and Photo Cull collects no
+usage data. It needs the network only to download the pinned models on the first scored run.
+
+The models come from Hugging Face and GitHub at fixed revisions, and Photo Cull checks the
+MUSIQ and aesthetic weights against fixed SHA-256 values. Reports, exports, and the cache go in
+the output folder, which is `.photo-cull` inside your photo folder unless you choose
+another. Downloaded models go in your user cache folder. See
+[Privacy and model integrity](docs/reference.md#privacy-and-model-integrity).
+
+## Models and licenses
+
+| Component | Source | License |
+| --- | --- | --- |
+| CLIP ViT-L/14 image model | [OpenAI](https://github.com/openai/CLIP), through [Hugging Face](https://huggingface.co/openai/clip-vit-large-patch14) | MIT for the code; see the model card for intended use |
+| Aesthetic head | [LAION improved aesthetic predictor](https://github.com/christophschuhmann/improved-aesthetic-predictor) | Apache-2.0 |
+| MUSIQ technical quality, KonIQ weights | [IQA-PyTorch (`pyiqa`)](https://github.com/chaofengc/IQA-PyTorch) | CC BY-NC-SA 4.0 |
+
+Photo Cull's own code is under the MIT license. `pyiqa` and its MUSIQ weights are licensed
+for non-commercial use only, so the tool as a whole is limited to non-commercial use while it
+depends on them. Check each license before you use Photo Cull commercially.
+
+## Project status
+
+Photo Cull is beta software. Continuous integration tests it on macOS and Windows, but these
+areas aren't fully validated yet:
+
+- representative sessions on Apple silicon (MPS) and on Windows with CUDA
+- camera-specific autofocus-point mapping
+- XMP rating round trips in photo applications
+- preset weights against a large set of keep-and-reject decisions
+- MUSIQ throughput in real sessions
+
+[PotentialEnhancements.md](PotentialEnhancements.md) lists known gaps and possible future
+work.
+
+## Contributing
+
+Pull requests are welcome. Set up the development environment and run the checks:
+
+~~~text
+uv sync --locked --group dev
+uv run pytest -q
+uv run ruff check .
+~~~
+
+Read [docs/development.md](docs/development.md) for the code layout and
+[AGENTS.md](AGENTS.md) for the rules every change must keep. The most important is that
+source photos are read-only: no change may delete, move, rename, or modify them.
+
+## License
+
+Photo Cull is released under the [MIT license](LICENSE). The models it downloads have their
+own licenses; see [Models and licenses](#models-and-licenses).
 
 ## More documentation
 
