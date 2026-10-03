@@ -549,6 +549,101 @@ class ThumbnailReuseTests(unittest.TestCase):
             self.assertEqual(read_manifest(run_dir)["counts"]["contact_sheet_images"], 0)
 
 
+class RunWarningTests(unittest.TestCase):
+    """Conditions that silently weaken a run must be counted and said out loud."""
+
+    def run_capturing(self, config: cull.PipelineConfig) -> tuple[int, str]:
+        stream = io.StringIO()
+        test_console = Console(file=stream, force_terminal=False, no_color=True, width=400)
+        with patch.object(cull, "console", test_console):
+            exit_code = run_with_mocks(config)
+        return exit_code, stream.getvalue()
+
+    def write_feedback(self, path: Path, rows: list[tuple[Path, str]]) -> Path:
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(("file_path", "decision"))
+            writer.writerows((str(photo), decision) for photo, decision in rows)
+        return path
+
+    def test_feedback_that_matches_no_photo_warns(self) -> None:
+        """Feedback written on another computer must not be ignored without a word."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source, output = root / "photos", root / "output"
+            make_photos(source)
+            feedback = self.write_feedback(
+                root / "feedback.csv", [(root / "elsewhere" / "same.jpg", "keep")]
+            )
+
+            exit_code, rendered = self.run_capturing(
+                build_config(source, output, selection="none", feedback_file=feedback)
+            )
+            counts = read_manifest(latest_run(output))["counts"]
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("None of the 1 decisions", rendered)
+            self.assertEqual((counts["feedback_decisions"], counts["feedback_matched"]), (1, 0))
+
+    def test_matching_feedback_is_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source, output = root / "photos", root / "output"
+            make_photos(source)
+            feedback = self.write_feedback(
+                root / "feedback.csv",
+                [
+                    (source / "day-one" / "same.jpg", "keep"),
+                    (source / "day-two" / "same.jpg", "reject"),
+                    (root / "elsewhere.jpg", "keep"),
+                ],
+            )
+
+            _, rendered = self.run_capturing(
+                build_config(source, output, selection="none", feedback_file=feedback)
+            )
+            counts = read_manifest(latest_run(output))["counts"]
+
+            self.assertIn("Feedback: 2 of 3 decisions match photos in this run", rendered)
+            self.assertNotIn("None of the", rendered)
+            self.assertEqual(
+                [counts[name] for name in ("feedback_matched", "feedback_keep", "feedback_reject")],
+                [2, 1, 1],
+            )
+
+    def test_file_date_capture_times_are_counted_and_warned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source, output = root / "photos", root / "output"
+            make_photos(source)
+
+            _, rendered = self.run_capturing(build_config(source, output, selection="none"))
+            counts = read_manifest(latest_run(output))["counts"]
+
+            self.assertEqual(counts["timestamps_from_file_dates"], 2)
+            self.assertEqual(counts["timestamps_from_metadata"], 0)
+            self.assertIn("2 of 2 photos have no readable capture time", rendered)
+            self.assertIn("Install ExifTool", rendered)
+
+    def test_embedded_capture_times_raise_no_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source, output = root / "photos", root / "output"
+            source.mkdir(parents=True)
+            exif = Image.Exif()
+            exif[306] = "2026:09:25 12:00:00"
+            Image.new("RGB", (64, 48), "red").save(source / "dated.jpg", exif=exif)
+
+            _, rendered = self.run_capturing(build_config(source, output, selection="none"))
+            counts = read_manifest(latest_run(output))["counts"]
+            rows = read_rows(latest_run(output) / "evaluation.csv")
+
+            self.assertEqual(rows[0]["timestamp_source"], "pillow:DateTime")
+            self.assertEqual(counts["timestamps_from_file_dates"], 0)
+            self.assertEqual(counts["timestamps_from_metadata"], 1)
+            self.assertNotIn("no readable capture time", rendered)
+
+
 class ReviewPageBurstTests(unittest.TestCase):
     """The rest of this file runs `no_group`, so the burst layout needs its own run."""
 

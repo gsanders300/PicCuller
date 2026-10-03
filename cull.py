@@ -520,6 +520,7 @@ def _execute_pipeline(
     if not records:
         raise RuntimeError("No images were successfully processed")
 
+    _report_timestamp_sources(records, metadata_backend, audit)
     audit.set_phase("ranking")
     assign_session_focus_factors(records, profile)
     if config.no_group:
@@ -548,6 +549,8 @@ def _execute_pipeline(
     for record in records:
         record["feedback_decision"] = feedback.get(record["file_path"], "")
         record["portfolio_selected"] = False
+    if feedback:
+        _report_feedback_matches(feedback, records, config.feedback_file, folder, audit)
 
     _show_summary(winners, len(records), folder)
 
@@ -1033,6 +1036,67 @@ def _assign_ranks(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for record in records:
         record.setdefault("selection_rank", "")
     return winners
+
+
+def _report_timestamp_sources(
+    records: list[dict[str, Any]],
+    metadata_backend: str,
+    audit: RunAudit,
+) -> None:
+    """Count where capture times came from, and warn about file-date fallbacks.
+
+    A photo without a readable capture time gets its file's modified time and a blank
+    camera name. Both feed burst grouping, so the fallback can merge or split bursts
+    with no other visible sign.
+    """
+    from_files = sum(record["timestamp_source"] == "filesystem_mtime" for record in records)
+    counts = audit.data["counts"]
+    counts["timestamps_from_metadata"] = len(records) - from_files
+    counts["timestamps_from_file_dates"] = from_files
+    counts["timezones_assumed"] = sum(
+        record["timezone_source"] == "system_local_assumption" for record in records
+    )
+    if from_files:
+        advice = (
+            " Install ExifTool so Photo Cull can read capture times from more formats."
+            if metadata_backend == "pillow"
+            else ""
+        )
+        _warning(
+            f"{from_files} of {len(records)} photos have no readable capture time, so Photo "
+            f"Cull used each file's modified time. Their burst grouping may be wrong.{advice}"
+        )
+
+
+def _report_feedback_matches(
+    feedback: dict[str, str],
+    records: list[dict[str, Any]],
+    feedback_file: Path | None,
+    folder: Path,
+    audit: RunAudit,
+) -> None:
+    """Say how many feedback decisions apply to this run.
+
+    A file written on another computer, or before the collection moved, can match no
+    photo at all, and the run would otherwise finish as if no feedback had been given.
+    """
+    matched = [record["feedback_decision"] for record in records if record["feedback_decision"]]
+    keeps = matched.count("keep")
+    counts = audit.data["counts"]
+    counts["feedback_decisions"] = len(feedback)
+    counts["feedback_matched"] = len(matched)
+    counts["feedback_keep"] = keeps
+    counts["feedback_reject"] = len(matched) - keeps
+    if not matched:
+        _warning(
+            f"None of the {len(feedback)} decisions in {feedback_file} match a photo in this "
+            f"run. Check that their paths point into {folder}."
+        )
+        return
+    console.print(
+        f"Feedback: {len(matched)} of {len(feedback)} decisions match photos in this run "
+        f"({keeps} keep, {len(matched) - keeps} reject)."
+    )
 
 
 def _review_groups(

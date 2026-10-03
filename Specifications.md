@@ -91,6 +91,11 @@ metadata modification time. The resulting labels are:
 `timestamp_source` names the field that supplied the time, such as
 `exiftool:DateTimeOriginal`, or `filesystem_mtime` for the last case.
 
+The file-system fallback also leaves the camera model empty, and both feed burst grouping.
+Each run therefore counts `timestamps_from_metadata`, `timestamps_from_file_dates`, and
+`timezones_assumed` in `run.json`, and warns when any photo used its file date. The warning
+suggests ExifTool when the Pillow backend is in use.
+
 ### Decoding
 
 1. JPEG decoding uses Pillow draft scaling where available, with an aspect-correct box.
@@ -609,6 +614,10 @@ keeps are forced into the selection but do not occupy the first position.
 - An invalid non-empty decision stops the run and names its row.
 - A relative path resolves from the source root. When a path appears more than once, the
   last decision applies.
+- The run reports how many decisions match an evaluated photo, and warns when none do,
+  because a file written on another computer or before the collection moved would
+  otherwise be ignored without a sign. `run.json` records `feedback_decisions`,
+  `feedback_matched`, `feedback_keep`, and `feedback_reject`.
 
 ### Diversity
 

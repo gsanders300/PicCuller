@@ -1,3 +1,4 @@
+import os
 import random
 import tempfile
 import unittest
@@ -297,6 +298,40 @@ class ReviewPageTests(unittest.TestCase):
             self.assertIn('<div id="viewer" hidden>', html)
             self.assertIn('<img id="viewer-image" alt="">', html)
             self.assertIn("K keep · R reject", html)
+
+    def review_page(self, run_name: str) -> str:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            thumbnail = root / "store.jpg"
+            thumbnail.write_bytes(b"jpeg")
+            candidate = {
+                "file_path": str(root / "a.jpg"),
+                "composite_score": 4.0,
+                "aesthetic_score": 6.0,
+                "musiq_score": 70.0,
+                "selection_rank": 1,
+            }
+            page = root / run_name / "review.html"
+            generate_contact_sheet(page, [[candidate]], lambda _source: thumbnail)
+            return page.read_text(encoding="utf-8")
+
+    def test_decisions_are_remembered_per_run(self) -> None:
+        """Browsers share one storage area for file:// pages, so the key names the run."""
+        first = self.review_page("run_20260925_191033_757361")
+        second = self.review_page("run_20260925_191401_886762")
+
+        self.assertIn('const storageKey="photo-cull:run_20260925_191033_757361";', first)
+        self.assertIn('const storageKey="photo-cull:run_20260925_191401_886762";', second)
+        self.assertIn("localStorage.setItem(storageKey", first)
+
+    @unittest.skipIf(os.name == "nt", "Windows does not allow < or > in a folder name")
+    def test_a_hostile_run_folder_cannot_open_markup_in_the_script(self) -> None:
+        # A folder name cannot hold "/", so "</script>" is impossible, but "<script" or
+        # "<!--" inside a script block still changes how the browser parses it.
+        html = self.review_page("run<script><!--")
+
+        self.assertIn('const storageKey="photo-cull:run\\u003cscript>\\u003c!--";', html)
+        self.assertNotIn("run<script>", html)
 
 
 if __name__ == "__main__":

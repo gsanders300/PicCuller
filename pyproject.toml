@@ -53,6 +53,12 @@ py-modules = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# An unclosed file only fails on Windows, where it cannot be deleted, so make the
+# leak fail on every platform.
+filterwarnings = [
+    "error::ResourceWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.ruff]
 line-length = 100

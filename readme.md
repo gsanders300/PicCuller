@@ -344,6 +344,14 @@ folder with no supported images exits with code 0 and creates no run folder. See
 `--metadata-backend pillow`. Pillow reads standard EXIF and some RAW preview EXIF, and falls
 back to the file's modification time when there is none.
 
+**A warning says photos have no readable capture time.** Photo Cull used those files'
+modified times, which can put them in the wrong bursts. Install ExifTool, which reads capture
+times from more formats, and run again.
+
+**A warning says no feedback decisions match.** The paths in your feedback file don't point
+into the folder you ran on. This happens when you mark photos on another computer or move the
+collection. Edit the paths, or run on the folder the file was made for.
+
 **Capture times are in the wrong zone.** Tell Photo Cull the zone the camera was set to. This
 changes only timestamps that don't already include an offset:
 
@@ -368,8 +376,9 @@ branch.
 **Nothing is exported.** Without a terminal, Photo Cull asks nothing and exports nothing
 unless you pass `--select`. Also check your feedback file for `reject` decisions.
 
-**The review page forgot my decisions.** The page keeps them only while it's open. Select
-`Download feedback.csv` before you close or reload it.
+**The review page forgot my decisions.** The browser saves them for each run, but only in
+that browser on that computer, and not at all if it blocks local storage. Select
+`Download feedback.csv` when you finish, because Photo Cull reads only that file.
 
 **A spreadsheet mangles the CSV.** Import it as UTF-8 and keep path columns as text. Photo
 Cull already protects cells that a spreadsheet could run as formulas.

@@ -52,6 +52,8 @@ class RunAuditTests(unittest.TestCase):
             audit.record_failure(root / "bad.jpg", "decode", ValueError("broken"))
 
             failures = audit.failures_path.read_text(encoding="utf-8")
+            # Windows cannot delete the temporary directory while the file is open.
+            audit.finish()
 
         self.assertIn("bad.jpg", failures)
         self.assertIn("ValueError", failures)
@@ -115,6 +117,7 @@ class RunAuditTests(unittest.TestCase):
             self.assertEqual(rows[1]["file_path"], "")
             manifest = json.loads(audit.manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["counts"]["failed"], 2)
+            audit.finish()
 
     def test_empty_failures_file_has_only_a_header(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -148,6 +151,7 @@ class RunAuditTests(unittest.TestCase):
             audit.record_failure(root / "a.jpg", "decode", ValueError("=cmd|'/c calc'!A1"))
 
             rows = read_failure_rows(audit.failures_path)
+            audit.finish()
 
             self.assertTrue(rows[0]["message"].startswith("'="))
 

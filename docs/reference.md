@@ -265,6 +265,10 @@ and without that option the current system zone. It never silently treats a loca
 as UTC. The report records the local timestamp, its UTC value, the timestamp source, and the
 timezone source.
 
+A photo that falls back to the file-system time also has no camera model, and both feed burst
+grouping. Photo Cull warns when any photo used its file date, and `run.json` counts the
+capture-time sources. With the Pillow backend, the warning suggests installing ExifTool.
+
 ## Scores
 
 The score supports a first selection. It is not an objective measure of artistic value, and
@@ -553,6 +557,9 @@ relative/path/IMG_0003.ARW,keep
 - An invalid non-empty decision stops the run.
 - When a path appears more than once, the last decision wins.
 - Extra columns are ignored.
+- Photo Cull reports how many decisions match photos in the run, and warns when none do.
+  That usually means the file was written on another computer or before the collection
+  moved.
 
 Each run writes a `feedback.csv` template containing every candidate, with the current
 selection marked `keep`. It adds the columns `selection_rank`, `global_quality_rank`, and
@@ -693,8 +700,10 @@ resolution around that point, and click again to fit it to the window. In the fu
 view, the arrow keys move between photos, `K` marks keep, `R` marks reject, and `Esc` closes.
 
 Mark cards `Keep` or `Reject`, then select `Download feedback.csv`. The downloaded file
-contains only the decisions you made on the page. The page keeps decisions only in browser
-memory, so download before you close or reload it.
+contains only the decisions you made on the page. The browser saves your decisions for each
+run, so they survive a reload or a closed tab in the same browser. They stay on that computer,
+and a browser that blocks local storage keeps them only while the page is open. The
+downloaded file is the only copy Photo Cull reads.
 
 ## Output files
 
@@ -736,6 +745,8 @@ The run audit, updated throughout the run. Its final status is `completed`, `fai
 - counts: discovered, cached, evaluated, preset-refreshed, failed, winners, selected, and
   exported
 - contact-sheet counts: images, bursts, thumbnails decoded, reused, and pruned
+- capture-time counts: from metadata, from file dates, and with an assumed time zone
+- feedback counts, when a feedback file is given: decisions, matched, keep, and reject
 - phase times, and per-stage times with an image count for each stage
 - paths to generated outputs
 
