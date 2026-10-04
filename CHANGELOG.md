@@ -3,6 +3,17 @@
 Each release lists what changed for people who use Photo Cull. The release workflow
 publishes the section that matches the tag, so every tagged version needs a section here.
 
+## [1.0.2] - 2026-10-04
+
+A documentation release with no change to how Photo Cull works.
+
+### Changed
+
+- The README now says up front that Photo Cull is for non-commercial use, because it
+  depends on `pyiqa` and the MUSIQ weights.
+- The license badge now separates the MIT code license from the non-commercial use limit.
+- Added `THIRD-PARTY-NOTICES.md`, which lists every component and its license.
+
 ## [1.0.1] - 2026-10-03
 
 A maintenance release with no change to how Photo Cull works.
