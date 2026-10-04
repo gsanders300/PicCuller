@@ -3,7 +3,8 @@
 [![CI](https://github.com/gsanders300/PicCuller/actions/workflows/ci.yml/badge.svg)](https://github.com/gsanders300/PicCuller/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/gsanders300/PicCuller)](https://github.com/gsanders300/PicCuller/releases)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/code-MIT-green.svg)](LICENSE)
+[![Use: non-commercial](https://img.shields.io/badge/use-non--commercial%20only-orange.svg)](#models-and-licenses)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)](docs/reference.md#system-requirements)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
@@ -15,6 +16,11 @@ separate folder. Everything runs on your own computer.
 
 **Your originals are never touched.** Photo Cull does not delete, move, rename, or write to
 any source file. Optional star ratings go only into the exported copies.
+
+> **Non-commercial use only.** Photo Cull's code is MIT, but it depends on `pyiqa` and the
+> MUSIQ model weights, which are licensed for non-commercial use. Do not use Photo Cull in
+> paid or commercial work unless you replace those components. See
+> [Models and licenses](#models-and-licenses).
 
 This guide covers everyday use. For every option, rule, and output column, see the
 [reference](docs/reference.md). For the reasoning behind each step, read
@@ -471,9 +477,17 @@ another. Downloaded models go in your user cache folder. See
 | Aesthetic head | [LAION improved aesthetic predictor](https://github.com/christophschuhmann/improved-aesthetic-predictor) | Apache-2.0 |
 | MUSIQ technical quality, KonIQ weights | [IQA-PyTorch (`pyiqa`)](https://github.com/chaofengc/IQA-PyTorch) | CC BY-NC-SA 4.0 |
 
-Photo Cull's own code is under the MIT license. `pyiqa` and its MUSIQ weights are licensed
-for non-commercial use only, so the tool as a whole is limited to non-commercial use while it
-depends on them. Check each license before you use Photo Cull commercially.
+Photo Cull's own code is under the MIT license. Three components carry extra terms:
+
+- **`pyiqa` 0.1.15** is licensed under PolyForm Noncommercial 1.0.0.
+- **MUSIQ (KonIQ) weights** are licensed under CC BY-NC-SA 4.0. Photo Cull downloads them
+  on first run from the IQA-PyTorch weights repository. They are not included in this repo.
+- **CLIP ViT-L/14** is MIT for the code. OpenAI's model card limits intended use to
+  research, so read it before any deployment.
+
+While Photo Cull depends on `pyiqa` and the MUSIQ weights, treat the tool as a whole as
+non-commercial. These terms apply to whoever installs and runs those components. They do
+not change the license on Photo Cull's source files.
 
 ## Project status
 
@@ -505,8 +519,10 @@ source photos are read-only: no change may delete, move, rename, or modify them.
 
 ## License
 
-Photo Cull is released under the [MIT license](LICENSE). The models it downloads have their
-own licenses; see [Models and licenses](#models-and-licenses).
+Photo Cull's source code is released under the [MIT license](LICENSE). Its dependencies
+and downloaded models have their own licenses, and some limit use to non-commercial
+purposes. See [Models and licenses](#models-and-licenses) and
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## More documentation
 
