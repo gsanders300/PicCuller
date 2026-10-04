@@ -1,6 +1,6 @@
 [project]
 name = "photo-cull"
-version = "1.0.1"
+version = "1.0.2"
 description = "Local RAW and JPEG photo culling: group bursts, score every frame, and export the keepers"
 readme = "readme.md"
 license = "MIT"
