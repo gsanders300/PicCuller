@@ -113,8 +113,10 @@ After every push to `main`, the Release workflow (`.github/workflows/release.yml
 sets the new version in `pyproject.toml` and `uv.lock` and adds the changelog section.
 Commits that don't follow the format are ignored.
 
-1. Merge the release pull request when CI on `main` is green. GitHub doesn't run CI on
-   the release pull request itself, because a workflow token opened it.
+1. The workflow merges the release pull request at once. It doesn't wait for CI on `main`,
+   and GitHub doesn't run CI on the release pull request itself, because a workflow token
+   opened it. Run the tests locally before you push a `feat`, `fix`, `perf`, `build`, or
+   `revert` commit.
 2. The workflow tags the merge commit, publishes the GitHub release with the changelog
    section as the notes, and attaches the source distribution and wheel.
 

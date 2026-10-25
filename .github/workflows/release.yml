@@ -13,11 +13,26 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      release_created: ${{ steps.release.outputs.release_created == 'true' || steps.release_after_merge.outputs.release_created == 'true' }}
+      tag_name: ${{ steps.release_after_merge.outputs.tag_name || steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v5
         id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      # A merge made with the workflow token does not start another workflow run,
+      # so the second release-please run below creates the tag and release.
+      - name: Merge the release pull request
+        id: merge
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr).number }}
+        run: gh pr merge "${PR_NUMBER}" --squash --repo "${GITHUB_REPOSITORY}"
+      - uses: googleapis/release-please-action@v5
+        id: release_after_merge
+        if: ${{ steps.merge.outcome == 'success' }}
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
