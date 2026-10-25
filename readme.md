@@ -105,7 +105,9 @@ also work on the CPU alone, just more slowly. See
    camera details more reliably, which makes burst grouping more accurate.
 
 The first run needs an internet connection to download about 1.8 GB of scoring models. Later
-runs work offline.
+runs work offline. Each run also checks, with a few small requests, whether newer models exist.
+It only reports them and never fails when you are offline. Add `--no-model-update-check` to
+skip it.
 
 ### 2. Run it on a folder
 
@@ -461,7 +463,9 @@ One small collection isn't enough to judge the tool.
 ## Privacy
 
 Photo Cull runs on your computer. Your photos never leave it, and Photo Cull collects no
-usage data. It needs the network only to download the pinned models on the first scored run.
+usage data. It needs the network to download the pinned models on the first scored run. Each
+run also sends a few small requests to Hugging Face and GitHub to check for newer models. They
+carry no photo data. Add `--no-model-update-check` to send none.
 
 The models come from Hugging Face and GitHub at fixed revisions, and Photo Cull checks the
 MUSIQ and aesthetic weights against fixed SHA-256 values. Reports, exports, and the cache go in

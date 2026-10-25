@@ -396,6 +396,11 @@ hit.
    `phash`, `musiq`, `clip`, `portrait`, `preset_refresh`, and `thumbnail_decode`.
 5. A fully cached run records no stages, because it evaluates nothing.
 6. Time spent waiting at the prompt is recorded as the `awaiting_selection` phase.
+7. Unless `--no-model-update-check` is given, every run compares each pinned model with
+   upstream and records the result as `model_update_check` in `run.json`. The check only
+   reports. It never changes the models in use, the cache identity, the exit code, or the
+   failure count. A failed lookup prints one line and is recorded in `run.json`. It uses only
+   `requests`, so a cached run still avoids the machine-learning stack.
 
 **Why stage times:** Phase timings overlap, because decoding runs while inference uses the
 previous batch, so they cannot be compared directly. Stage times are the values a
@@ -469,7 +474,9 @@ The interface presents information in this order:
    message and exits successfully without a run directory. A discovery error that leaves
    no readable supported image creates a failed audit and exits with code 1 when the
    output root is writable.
-3. Show the run-directory path immediately after the audit is created.
+3. Show the run-directory path immediately after the audit is created. Unless
+   `--no-model-update-check` is given, show the `Checking for newer models` status next,
+   then a notice for each newer model or one line for a failed lookup.
 4. Report preset-refresh scoring and cache reuse when cached evaluations exist.
 5. When uncached files need ExifTool, show the metadata status. A metadata fallback
    produces an explanatory warning.

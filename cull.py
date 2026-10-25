@@ -142,6 +142,7 @@ class PipelineConfig:
     aesthetic_head: Path | None
     plain: bool
     debug: bool
+    check_model_updates: bool = True
 
     def audit_dict(self) -> dict[str, Any]:
         values = asdict(self)
@@ -365,6 +366,8 @@ def _execute_pipeline(
     metadata_backend = select_metadata_backend(config.metadata_backend)
     assumed_timezone = resolve_assumed_timezone(config.assumed_timezone)
     feedback = load_feedback(config.feedback_file, folder)
+    if config.check_model_updates:
+        _report_model_updates(config, audit)
 
     cache_signature = _cache_signature(config, metadata_backend, audit.data["models"])
     records: list[dict[str, Any]] = []
@@ -1471,6 +1474,32 @@ def _status(message: str, config: PipelineConfig):
     return console.status(f"[cyan]{message}...[/cyan]")
 
 
+def _report_model_updates(config: PipelineConfig, audit: RunAudit) -> None:
+    """Tell the user when upstream models moved. Scoring keeps the pinned revisions."""
+    from model_updates import check_model_updates
+
+    with _status("Checking for newer models", config):
+        check = check_model_updates()
+    audit.data["model_update_check"] = check.to_dict()
+    if check.updates:
+        details = ", ".join(
+            f"{update.name} (pinned {update.pinned[:12]}, latest {update.latest[:12]})"
+            for update in check.updates
+        )
+        console.print(
+            f"[yellow]Newer upstream models:[/yellow] {escape(details)}. "
+            "This run still uses the pinned models."
+        )
+    if check.unavailable:
+        failed = ", ".join(
+            f"{name} ({reason.split(':', 1)[0]})" for name, reason in check.unavailable.items()
+        )
+        console.print(
+            f"[yellow]Could not check for newer models:[/yellow] {escape(failed)}. "
+            "See run.json. Use --no-model-update-check to stop checking."
+        )
+
+
 def _warning(message: str) -> None:
     console.print(f"[yellow]Warning:[/yellow] {escape(message)}")
 
@@ -1591,6 +1620,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use static output without color or animated progress",
     )
+    parser.add_argument(
+        "--no-model-update-check",
+        action="store_true",
+        help="Skip the startup check for newer upstream models",
+    )
     parser.add_argument("--debug", action="store_true", help="Show exception tracebacks")
     cache_group = parser.add_mutually_exclusive_group()
     cache_group.add_argument(
@@ -1631,6 +1665,7 @@ def config_from_args(args: argparse.Namespace) -> PipelineConfig:
         aesthetic_head=args.aesthetic_head,
         plain=args.plain,
         debug=args.debug,
+        check_model_updates=not args.no_model_update_check,
     )
 
 

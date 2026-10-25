@@ -66,6 +66,7 @@ The development group adds `pytest>=8,<10` and `ruff>=0.8,<1`.
 | `metadata_reader.py` | ExifTool and Pillow metadata, timestamps, and time zones |
 | `model_config.py` | Pinned model identities, revisions, URLs, and checksums |
 | `model_runtime.py` | Verified model download, loading, inference, batching, and device fallback |
+| `model_updates.py` | Report-only startup check for newer upstream models |
 | `scoring.py` | Scoring profiles, focus factors, burst grouping, composite scores, and score reasons |
 | `advanced_analysis.py` | CLIP subject prompts and portrait face and eye checks |
 | `evaluation_cache.py` | SQLite evaluation cache: schema, migration, lookup, and writes |

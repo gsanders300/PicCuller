@@ -70,6 +70,9 @@ The `--device` option selects the compute device:
 The first scored run needs an internet connection to download the pinned CLIP model, the
 MUSIQ weights, and the aesthetic-head weights. Later runs use the local model cache.
 
+Every run also checks whether upstream has newer model files. See
+[Model update check](#model-update-check). Add `--no-model-update-check` to skip it.
+
 ExifTool is optional but recommended. It gives the most reliable RAW timestamps, camera
 identifiers, sequence numbers, and autofocus descriptions. Put the `exiftool` command on
 `PATH`; the default `auto` metadata backend detects it.
@@ -148,6 +151,7 @@ novelty in CLIP space, and high values can select lower-quality photos.
 | --- | --- | --- |
 | `--no-cache` | Off | Do not read or write the evaluation cache. |
 | `--refresh-cache` | Off | Ignore cached evaluations, evaluate again, and replace the cache records. |
+| `--no-model-update-check` | Off | Skip the startup check for newer upstream models. See [Model update check](#model-update-check). |
 | `--plain` | Off | Static output without color or animation, for logs and scripts. |
 | `--debug` | Off | Show a traceback for a fatal error. Per-image failures still go to `failures.csv`. |
 | `-h`, `--help` | Not applicable | Show the help and stop. |
@@ -161,7 +165,8 @@ Each run follows these steps:
 1. Validate the configuration.
 2. Discover supported image files.
 3. Choose the primary image in each family.
-4. Read valid cache records.
+4. Check for newer upstream models, unless you pass `--no-model-update-check`. Then read
+   valid cache records.
 5. Read metadata for uncached images.
 6. Load the pinned models, only if uncached work exists.
 7. Decode and evaluate the uncached images.
@@ -741,6 +746,8 @@ The run audit, updated throughout the run. Its final status is `completed`, `fai
 - source, output, and run paths
 - all configuration values and scoring-profile values
 - model names, revisions, and SHA-256 values
+- the model update check: its status, any newer models, and any lookup that failed
+  (absent with `--no-model-update-check`)
 - Python, platform, and package versions
 - counts: discovered, cached, evaluated, preset-refreshed, failed, winners, selected, and
   exported
@@ -1022,6 +1029,34 @@ The first scored run downloads model files from Hugging Face and GitHub. CLIP us
 revision, and the MUSIQ and default aesthetic-head files are verified with SHA-256. Model
 files live in the operating system's user cache directory under the `photo-cull` application
 name.
+
+### Model update check
+
+Every run, including a fully cached one, asks upstream whether the pinned models have
+changed. Photo Cull sends 4 small requests to `huggingface.co` and `api.github.com`. They
+carry no photo data, file names, or paths, only a `User-Agent` of
+`photo-cull-model-update-check`.
+
+| Model | What Photo Cull compares |
+| --- | --- |
+| CLIP | The latest revision on the `main` branch with the pinned revision. |
+| MUSIQ | The SHA-256 of the latest weights file with the pinned SHA-256. |
+| Aesthetic head | The last commit that changed the weights file, at the pin and at the default branch. |
+
+The check only reports. If a model changed, a line such as `Newer upstream models: CLIP
+(pinned 32bd64288804, latest abc123def456). This run still uses the pinned models.` appears
+and the run continues with the pinned models. Updating a pin is a code change that also
+replaces the SHA-256 values and the cache identity.
+
+The check never fails a run. A timeout, a network error, a certificate error, a GitHub rate
+limit (60 requests an hour without a token), or an unexpected reply prints one line, `Could
+not check for newer models: MUSIQ (ConnectionError)`, and is recorded in `run.json`. The
+failure count and exit code do not change. If you use a TLS-intercepting antivirus, the check
+needs the same CA bundle environment variables as the model download. Each request waits at most about 8 seconds, and the 3 model lookups run at the
+same time.
+CLIP can report a newer revision when upstream changed only documentation.
+
+Pass `--no-model-update-check` to make no request at all.
 
 If a checksum does not match, Photo Cull stops and prints the exact file path. Remove only
 that file and run again to download a verified copy. Do not remove the whole user cache

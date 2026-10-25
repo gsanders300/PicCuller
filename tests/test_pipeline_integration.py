@@ -15,6 +15,7 @@ from rich.console import Console
 
 import cull
 from evaluation_cache import EvaluationCache
+from model_updates import ModelUpdate, ModelUpdateCheck
 from thumbnail_store import ThumbnailStore
 
 
@@ -107,6 +108,43 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 
 
 class PipelineIntegrationTests(unittest.TestCase):
+    def test_model_update_check_runs_by_default_and_is_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+            check = ModelUpdateCheck((ModelUpdate("CLIP", "a" * 40, "b" * 40),), {})
+            stream = io.StringIO()
+            test_console = Console(file=stream, force_terminal=False, no_color=True)
+
+            with (
+                patch.object(cull, "console", test_console),
+                patch("model_updates.check_model_updates", return_value=check) as lookup,
+            ):
+                exit_code = run_with_mocks(build_config(source, output))
+
+            manifest = read_manifest(latest_run(output))
+            self.assertEqual(exit_code, 0)
+            lookup.assert_called_once()
+            self.assertEqual(manifest["model_update_check"]["status"], "updates_available")
+            self.assertIn("still uses the pinned models", stream.getvalue())
+
+    def test_opt_out_skips_the_model_update_check(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source = root / "photos"
+            output = root / "output"
+            make_photos(source)
+
+            with patch("model_updates.check_model_updates") as lookup:
+                exit_code = run_with_mocks(build_config(source, output, check_model_updates=False))
+
+            manifest = read_manifest(latest_run(output))
+            self.assertEqual(exit_code, 0)
+            lookup.assert_not_called()
+            self.assertNotIn("model_update_check", manifest)
+
     def test_discovery_interrupt_returns_130_without_a_traceback_or_audit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()

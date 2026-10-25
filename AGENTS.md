@@ -57,6 +57,7 @@ an update. If the lock changes, include it in validation and explain why it chan
 | `metadata_reader.py` | ExifTool and Pillow metadata, timestamps, and timezone handling |
 | `model_config.py` | Model names, immutable revisions, URLs, and checksums |
 | `model_runtime.py` | Verified model download, model load, inference, batching, and device fallback |
+| `model_updates.py` | Report-only startup check for newer upstream models; no ML imports |
 | `scoring.py` | Scoring profiles, focus factors, burst grouping, composite scores, and score reasons |
 | `advanced_analysis.py` | CLIP subject prompts and portrait face/eye checks |
 | `evaluation_cache.py` | SQLite cache schema, migration, lookup, and checkpoint writes |
