@@ -88,7 +88,7 @@ class ModelRuntime:
         self.clip_processor = CLIPProcessor.from_pretrained(
             CLIP_MODEL_ID,
             revision=CLIP_MODEL_REVISION,
-            use_fast=False,
+            backend="pil",
         )
         self.aesthetic_head, self.aesthetic_sha256 = load_aesthetic_head(
             device,
@@ -161,7 +161,7 @@ class ModelRuntime:
             else nullcontext()
         )
         with torch.inference_mode(), autocast_context:
-            features = self.clip_model.get_image_features(**inputs)
+            features = self.clip_model.get_image_features(**inputs).pooler_output
             features = features / features.norm(p=2, dim=-1, keepdim=True)
             aesthetic_scores = self.aesthetic_head(features).flatten()
             if self.subject_text_features is not None:
@@ -195,7 +195,7 @@ class ModelRuntime:
         inputs = self.clip_processor(text=list(prompts), return_tensors="pt", padding=True)
         inputs = inputs.to(self.device)
         with torch.inference_mode():
-            features = self.clip_model.get_text_features(**inputs)
+            features = self.clip_model.get_text_features(**inputs).pooler_output
             return features / features.norm(p=2, dim=-1, keepdim=True)
 
 

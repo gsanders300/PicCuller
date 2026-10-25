@@ -88,6 +88,40 @@ class SubjectScorerTests(unittest.TestCase):
         )
 
 
+class _FakeClipModel:
+    def get_image_features(self, **_inputs):
+        return SimpleNamespace(pooler_output=torch.tensor(((3.0, 4.0), (0.0, 2.0))))
+
+    def get_text_features(self, **_inputs):
+        return SimpleNamespace(pooler_output=torch.tensor(((3.0, 4.0), (0.0, 2.0))))
+
+
+class ModelRuntimeInferenceTests(unittest.TestCase):
+    def _runtime(self) -> model_runtime.ModelRuntime:
+        runtime = object.__new__(model_runtime.ModelRuntime)
+        runtime.device = torch.device("cpu")
+        runtime.mixed_precision = False
+        runtime.clip_model = _FakeClipModel()
+        runtime.clip_processor = lambda **_kwargs: _FakeInputs()
+        runtime.aesthetic_head = lambda features: features.sum(dim=-1, keepdim=True)
+        runtime.subject_text_features = None
+        return runtime
+
+    def test_image_batch_reads_the_projected_pooler_output(self) -> None:
+        results = self._runtime().infer_clip_batch([object(), object()])
+
+        np.testing.assert_allclose(results[0].embedding, (0.6, 0.8), rtol=1e-6)
+        np.testing.assert_allclose(results[1].embedding, (0.0, 1.0), rtol=1e-6)
+        self.assertAlmostEqual(results[0].aesthetic_score, 1.4, places=6)
+        self.assertEqual(results[0].subject_integrity, 1.0)
+
+    def test_subject_text_features_are_normalized_pooler_output(self) -> None:
+        with patch.object(model_runtime, "SUBJECT_PROMPTS", {"portrait": ("a", "b")}):
+            features = self._runtime()._load_subject_features("portrait")
+
+        np.testing.assert_allclose(features.numpy(), ((0.6, 0.8), (0.0, 1.0)), rtol=1e-6)
+
+
 class ModelDownloadTests(unittest.TestCase):
     def test_verified_download_reports_byte_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

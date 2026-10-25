@@ -483,7 +483,7 @@ another. Downloaded models go in your user cache folder. See
 
 Photo Cull's own code is under the MIT license. Three components carry extra terms:
 
-- **`pyiqa` 0.1.15** is licensed under PolyForm Noncommercial 1.0.0.
+- **`pyiqa` 0.1.16** is licensed under PolyForm Noncommercial 1.0.0.
 - **MUSIQ (KonIQ) weights** are licensed under CC BY-NC-SA 4.0. Photo Cull downloads them
   on first run from the IQA-PyTorch weights repository. They are not included in this repo.
 - **CLIP ViT-L/14** is MIT for the code. OpenAI's model card limits intended use to

@@ -43,8 +43,8 @@ smoke test on macOS and Windows.
 | `torch` | `>=2.4,<2.7` | Model execution |
 | `torchvision` | `>=0.19,<0.22` | PyTorch image operations |
 | `numpy` | `>=1.26,<2` | Numeric arrays |
-| `transformers` | `>=4.40,<5` | CLIP model and processor |
-| `pyiqa` | `==0.1.15` | MUSIQ quality metric |
+| `transformers` | `>=5,<6` | CLIP model and processor |
+| `pyiqa` | `==0.1.16` | MUSIQ quality metric |
 | `imagehash` | `>=4.3,<5` | Perceptual image hash |
 | `rawpy` | `>=0.21,<0.28` | RAW decode through LibRaw |
 | `opencv-python` | `>=4.10,<5` | Focus, exposure, face, and eye analysis |
