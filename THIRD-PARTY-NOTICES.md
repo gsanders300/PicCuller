@@ -10,7 +10,7 @@ which carry their own terms. None of them are redistributed in this repository.
 | CLIP ViT-L/14 (OpenAI) | Image embeddings | MIT code, model card limits intended use | Read model card |
 | LAION improved aesthetic predictor | Visual appeal score | Apache-2.0 | Yes |
 | torch, torchvision, transformers, opencv-python | Core ML and image work | Apache-2.0 or BSD | Yes |
-| numpy, pillow, rawpy, rich, platformdirs, imagehash, requests | Support libraries | BSD, MIT, or Apache-2.0 | Yes |
+| numpy, pillow, rawpy, rich, platformdirs, imagehash, requests, hf-xet | Support libraries | BSD, MIT, or Apache-2.0 | Yes |
 
 Sources:
 - pyiqa: https://github.com/chaofengc/IQA-PyTorch

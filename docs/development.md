@@ -52,6 +52,7 @@ smoke test on macOS and Windows.
 | `platformdirs` | `>=4,<5` | Operating-system cache path |
 | `rich` | `>=13.7,<16` | Terminal interface |
 | `requests` | `>=2.31,<3` | Verified model download |
+| `hf-xet` | `>=1.1.3,<2` | Fast Hugging Face downloads. Windows skips it as a transitive dependency of `huggingface_hub` because `AMD64` fails the lowercase `amd64` marker. |
 
 The development group adds `pytest>=8,<10` and `ruff>=0.8,<1`.
 
