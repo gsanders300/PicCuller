@@ -48,7 +48,7 @@ smoke test on macOS and Windows.
 | `imagehash` | `>=4.3,<5` | Perceptual image hash |
 | `rawpy` | `>=0.21,<0.28` | RAW decode through LibRaw |
 | `opencv-python` | `>=4.10,<5` | Focus, exposure, face, and eye analysis |
-| `Pillow` | `>=10,<13` | Standard-image and preview operations |
+| `Pillow` | `>=10,<14` | Standard-image and preview operations |
 | `platformdirs` | `>=4,<5` | Operating-system cache path |
 | `rich` | `>=13.7,<16` | Terminal interface |
 | `requests` | `>=2.31,<3` | Verified model download |
