@@ -98,26 +98,26 @@ reader addressed as "you".
 
 ## Release a version
 
-The release workflow publishes a GitHub release whenever a `v*` tag is pushed. It stops if
-the tag doesn't match the version in `pyproject.toml`, or if `CHANGELOG.md` has no section for
-that version.
+Releases come from commit messages. Write each commit as a
+[Conventional Commit](https://www.conventionalcommits.org/): `type: summary`.
 
-1. Set the new version in `pyproject.toml`.
-2. Update the lock file with the `uv` version that CI pins in
-   `.github/workflows/ci.yml`, so only the project's version line changes:
+| Type | Effect on the next release |
+| --- | --- |
+| `feat` | Minor version bump |
+| `fix`, `perf`, `build`, `revert` | Patch version bump |
+| `docs`, `test`, `refactor`, `style`, `ci`, `chore` | No release |
+| Any type with `!` or a `BREAKING CHANGE:` footer | Major version bump |
 
-   ~~~text
-   uvx --from uv==0.9.18 uv lock
-   ~~~
+After every push to `main`, the Release workflow (`.github/workflows/release.yml`, using
+`release-please-config.json`) opens or updates one release pull request. That pull request
+sets the new version in `pyproject.toml` and `uv.lock` and adds the changelog section.
+Commits that don't follow the format are ignored.
 
-3. Add a `## [X.Y.Z] - YYYY-MM-DD` section and its link to `CHANGELOG.md`.
-4. Merge to `main` and wait for CI to pass on macOS and Windows.
-5. Tag the merged commit and push the tag:
+1. Merge the release pull request when CI on `main` is green. GitHub doesn't run CI on
+   the release pull request itself, because a workflow token opened it.
+2. The workflow tags the merge commit, publishes the GitHub release with the changelog
+   section as the notes, and attaches the source distribution and wheel.
 
-   ~~~text
-   git tag -a vX.Y.Z -m "Photo Cull vX.Y.Z"
-   git push origin vX.Y.Z
-   ~~~
-
-The workflow attaches the source distribution and wheel to the release, with that version's
-changelog section as the notes.
+The repository setting "Allow GitHub Actions to create and approve pull requests" must be
+on (Settings, Actions, General). `.release-please-manifest.json` holds the last released
+version. Don't edit it by hand.

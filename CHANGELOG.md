@@ -1,7 +1,7 @@
 # Changelog
 
 Each release lists what changed for people who use Photo Cull. The release workflow
-publishes the section that matches the tag, so every tagged version needs a section here.
+generates new sections from commit messages and publishes the section that matches the tag.
 
 ## [1.0.2] - 2026-10-04
 
