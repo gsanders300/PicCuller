@@ -3,6 +3,18 @@
 Each release lists what changed for people who use Photo Cull. The release workflow
 generates new sections from commit messages and publishes the section that matches the tag.
 
+## [1.1.0](https://github.com/gsanders300/PicCuller/compare/v1.0.2...v1.1.0) (2026-10-25)
+
+
+### Added
+
+* check for newer upstream models at startup ([1c964d6](https://github.com/gsanders300/PicCuller/commit/1c964d65586c209f79155958ec7b2127963348ec))
+
+
+### Build and dependencies
+
+* add hf-xet as a direct dependency ([34b8b26](https://github.com/gsanders300/PicCuller/commit/34b8b26df1b203a6259335d0abe2cf9748c535bb))
+
 ## [1.0.2] - 2026-10-04
 
 A documentation release with no change to how Photo Cull works.
