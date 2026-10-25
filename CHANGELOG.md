@@ -3,6 +3,15 @@
 Each release lists what changed for people who use Photo Cull. The release workflow
 generates new sections from commit messages and publishes the section that matches the tag.
 
+## [1.1.1](https://github.com/gsanders300/PicCuller/compare/v1.1.0...v1.1.1) (2026-10-25)
+
+
+### Build and dependencies
+
+* **deps:** allow Pillow 13 ([1ba4fc6](https://github.com/gsanders300/PicCuller/commit/1ba4fc65878fe9f1c3274a7a87adb6e477806c34))
+* **deps:** bump hf-xet, platformdirs, and ruff in lock ([9bdac6a](https://github.com/gsanders300/PicCuller/commit/9bdac6acccfa5ffe758389558eecb874a0f11b6f))
+* **deps:** upgrade transitive packages with security fixes ([0c72123](https://github.com/gsanders300/PicCuller/commit/0c72123e142aa995ef3b529ce64787e24f0c822d))
+
 ## [1.1.0](https://github.com/gsanders300/PicCuller/compare/v1.0.2...v1.1.0) (2026-10-25)
 
 
