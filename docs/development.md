@@ -40,8 +40,8 @@ smoke test on macOS and Windows.
 
 | Package | Version | Purpose |
 | --- | --- | --- |
-| `torch` | `>=2.4,<2.7` | Model execution |
-| `torchvision` | `>=0.19,<0.22` | PyTorch image operations |
+| `torch` | `>=2.13,<3` | Model execution |
+| `torchvision` | `>=0.28,<1` | PyTorch image operations |
 | `numpy` | `>=1.26,<2` | Numeric arrays |
 | `transformers` | `>=5,<6` | CLIP model and processor |
 | `pyiqa` | `==0.1.16` | MUSIQ quality metric |

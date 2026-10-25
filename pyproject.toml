@@ -17,8 +17,8 @@ classifiers = [
     "Topic :: Multimedia :: Graphics",
 ]
 dependencies = [
-    "torch>=2.4,<2.7",
-    "torchvision>=0.19,<0.22",
+    "torch>=2.13,<3",
+    "torchvision>=0.28,<1",
     "numpy>=1.26,<2",
     "transformers>=5,<6",
     "pyiqa==0.1.16",
@@ -89,15 +89,15 @@ ignore = ["BLE001"]
 
 # Explicit PyTorch wheel index for NVIDIA CUDA on Windows
 [[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 # Direct CUDA wheels to Windows while keeping macOS on standard PyPI MPS wheels
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu124", marker = "sys_platform == 'win32'" },
+    { index = "pytorch-cu126", marker = "sys_platform == 'win32'" },
 ]
 torchvision = [
-    { index = "pytorch-cu124", marker = "sys_platform == 'win32'" },
+    { index = "pytorch-cu126", marker = "sys_platform == 'win32'" },
 ]

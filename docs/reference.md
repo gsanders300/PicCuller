@@ -55,7 +55,7 @@ Supported targets:
 Continuous integration tests on macOS 14 and the latest Windows runner. Other systems can
 work, but they are not tested.
 
-For CUDA on Windows, the locked environment uses the PyTorch CUDA 12.4 wheels, so install a
+For CUDA on Windows, the locked environment uses the PyTorch CUDA 12.6 wheels, so install a
 compatible NVIDIA driver.
 
 The `--device` option selects the compute device:
