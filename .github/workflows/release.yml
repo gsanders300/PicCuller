@@ -28,7 +28,7 @@ jobs:
         if: ${{ steps.release.outputs.prs_created == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr).number }}
+          PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr || '{}').number }}
         run: gh pr merge "${PR_NUMBER}" --squash --repo "${GITHUB_REPOSITORY}"
       - uses: googleapis/release-please-action@v5
         id: release_after_merge
