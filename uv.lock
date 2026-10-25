@@ -1014,7 +1014,7 @@ wheels = [
 
 [[package]]
 name = "photo-cull"
-version = "1.1.1"
+version = "1.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "hf-xet" },
