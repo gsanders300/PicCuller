@@ -47,7 +47,7 @@ smoke test on macOS and Windows.
 | `pyiqa` | `==0.1.16` | MUSIQ quality metric |
 | `imagehash` | `>=4.3,<5` | Perceptual image hash |
 | `rawpy` | `>=0.21,<0.29` | RAW decode through LibRaw |
-| `opencv-python` | `>=4.10,<6` | Focus, exposure, face, and eye analysis |
+| `opencv-python` | `>=4.10,<5` | Focus, exposure, face, and eye analysis. OpenCV 5 removed `cv2.CascadeClassifier`, which the portrait check uses. |
 | `Pillow` | `>=10,<14` | Standard-image and preview operations |
 | `platformdirs` | `>=4,<5` | Operating-system cache path |
 | `rich` | `>=13.7,<16` | Terminal interface |

@@ -24,7 +24,8 @@ dependencies = [
     "pyiqa==0.1.16",
     "imagehash>=4.3,<5",
     "rawpy>=0.21,<0.29",
-    "opencv-python>=4.10,<6",
+    # <5: OpenCV 5 removed cv2.CascadeClassifier, which the portrait face and eye check uses.
+    "opencv-python>=4.10,<5",
     "pillow>=10,<14",
     "platformdirs>=4,<5",
     "rich>=13.7,<16",
@@ -86,6 +87,11 @@ target-version = "py312"
 
 [tool.ruff.lint]
 ignore = ["BLE001"]
+
+[tool.uv]
+# pyiqa pulls in the headless OpenCV build with no cap. Both builds install the same
+# cv2 module, so hold it to the opencv-python major above (OpenCV 5 lacks CascadeClassifier).
+constraint-dependencies = ["opencv-python-headless<5"]
 
 # Explicit PyTorch wheel index for NVIDIA CUDA on Windows
 [[tool.uv.index]]
