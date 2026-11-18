@@ -235,6 +235,17 @@ files such as `.xmp`.
 Replace `/photos` with your folder. Run `uv run photo-cull --help` to see every option and
 its default.
 
+**Update to the latest version,** from the folder you cloned:
+
+~~~text
+git pull
+uv sync --locked
+~~~
+
+Your cache and earlier runs are kept. When a release changes how photos are measured, the
+next run evaluates every photo again, once. [CHANGELOG.md](CHANGELOG.md) lists what each
+release changed.
+
 **Rank without exporting anything:**
 
 ~~~text

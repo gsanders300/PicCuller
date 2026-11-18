@@ -1101,6 +1101,25 @@ A large worker count can slow a slow disk, and a large batch can exhaust device 
 automatic batch splitting reduces that risk. The first run is slower because it downloads and
 initializes the models. A fully cached run does not import the machine-learning runtime.
 
+### Measure a run's speed
+
+To compare speed between versions or settings, time the same shoot with every photo
+evaluated:
+
+1. Run `uv run photo-cull /photos --refresh-cache`. `--refresh-cache` evaluates every photo
+   again, so the run measures evaluation rather than the cache. You can use the tuning
+   screen and export as usual; it runs after evaluation and doesn't change the evaluation
+   stages. Add `--select none` to skip it.
+2. Open that run's `run.json` and copy `stage_seconds`, `stage_counts`, and
+   `environment.resolved_device`.
+3. Divide each stage's seconds by its count for a cost per photo.
+4. After the change, repeat step 1 on the same shoot and compare the costs per photo.
+
+Keep the shoot, the device, and the `--batch-size` and `--workers` values the same for both
+runs. `timings_seconds` has the wall-clock time of each phase. Compare `thumbnail_decode`
+only between runs that made the same review page and used `show` the same way, because both
+add to it.
+
 ## Privacy and model integrity
 
 Photographs are processed on your computer and never uploaded.

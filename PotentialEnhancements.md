@@ -3,6 +3,56 @@
 This file tracks the original enhancement ideas: what exists today, what remains, and what
 blocks it. It does not repeat the system specification.
 
+## Planned work
+
+This order was chosen on 2026-11-17. Photo Cull is used as a first-pass filter: it cuts a
+shoot down and collapses bursts, and the final choice happens in Explorer, Finder, or
+Lightroom. So the measure that matters most is how rarely it drops a photo you'd keep.
+
+1. **Tuning screen.** Done in 1.2.0: counting modes, counts and percentages, weights, burst
+   looseness, and the `show` preview. See [Tuning screen](docs/reference.md#tuning-screen).
+2. **Speed baseline.** Next. Time one real shoot on the current code before step 4 changes
+   anything. On the computer you cull with:
+   1. Update: `git pull`, then `uv sync --locked`.
+   2. Run a typical shoot from scratch: `uv run photo-cull <shoot folder> --refresh-cache`.
+      It evaluates every photo again, so it takes as long as a first run.
+   3. Use the tuning screen as usual: for example `10%`, then `show`, then Enter on an empty
+      line. See [A typical session](readme.md#a-typical-session).
+   4. Keep that run's `run.json`, in `<shoot folder>/.photo-cull/run_.../`. Its
+      `stage_seconds` and `stage_counts` are the baseline.
+
+   [Measure a run's speed](docs/reference.md#measure-a-runs-speed) explains how to compare
+   two runs.
+3. **Decisions from the file manager.** Read your pruning of `picks/` back as keep and
+   reject decisions, so every culled shoot adds feedback without the review page:
+   - A photo left in `picks/` is a keep, and a deleted one is a reject.
+   - `picks/_alternates/` holds burst runners-up within 10% of their winner, outside your
+     count. Moving one into `picks/` records that the wrong frame won its burst.
+   - `picks/_audit/` holds about 20 random photos from below the cut, spread across score
+     bands, outside your count. Moving one into `picks/` records a missed keeper, which is
+     the only way to measure how many keepers the cut drops.
+   - A folder deleted without being opened counts as unreviewed, not rejected.
+4. **Faster evaluation with unchanged scores.**
+   - Prefetch decodes by file, so `--workers` helps above `--batch-size`.
+   - Run MUSIQ on several photos of identical size at once, if `pyiqa` supports it.
+   - Run face and eye checks on the decode threads.
+
+   Half-precision MUSIQ stays out unless timing shows MUSIQ still dominates. Each change is
+   checked against the step 2 baseline.
+5. **New measurements, in one cache change.**
+   - Face and eye checks on every photo, so the `eyes` weight works without
+     `--preset portrait`.
+   - Sharpness measured around the autofocus point, for Sony cameras only, when ExifTool
+     reads one. Other cameras are unchanged.
+   - Look-alike groups: burst winners that are nearly identical and within 5 minutes of
+     each other collapse to the best one. The `bursts` setting adjusts both.
+
+   Every shoot is evaluated again, once.
+6. **Weights fitted to your decisions.** `photo-cull-validate` fits the weights to the
+   decisions from step 3, tests them by leaving out one shoot at a time, and offers them in
+   the tuning screen as `start fitted`. It needs at least 3 shoots and 30 missed keepers or
+   wrong winners. A personal aesthetic model waits for about 2,000 decisions.
+
 ## Focus verification
 
 - **Today:** Genre profiles weight focus with per-preset floors and exponents. ExifTool
