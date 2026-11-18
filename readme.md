@@ -141,25 +141,82 @@ This example is illustrative; your names, scores, and reasons will differ.
 
 ### 3. Tune the selection, then export
 
-Photo Cull then shows the tuning screen: every setting with a one-line description, and a
-summary of what the export would hold. Scoring is already done, so each change redraws the
-summary in well under a second. Type a change and press Enter:
+When scoring finishes, Photo Cull opens the **tuning screen**. Here you decide how many
+photos to export and how they're chosen, and you can look at the result before anything is
+copied. Scoring is already done, so each change takes under a second.
 
-- Type a **count** or a **percentage**, such as `60` or `10%`, to set how many to export.
-- Type `mode bursts` to count each burst as one shot (the default), or `mode photos` to
-  rank every photo on its own. A percentage is of bursts or of photos to match.
-- Type a **weight**, such as `sharpness 1.5` or `exposure 0.5`, to change how much a factor
-  counts. `0` ignores it. `start wildlife` loads a preset's weights.
-- Type `show` to open the photos that just crossed the cut in Explorer or Finder.
-- Press **Enter** on an empty line to export with the current settings. The target starts
-  at `none`, so pressing Enter straight away exports nothing. The reports are still
-  written, so you can look first and export later.
+Nothing is copied until you press **Enter on an empty line**. Every other command is also
+a line you type and finish with Enter. Ctrl+C leaves without exporting, and the scores are
+kept for the next run.
 
-The summary shows how many photos the target selects, the score at the cut, how many
-photos entered and left with your last change, and how many files and gigabytes the export
-would copy. After an export, an `Exported Photos` table lists each photo and why it was
-chosen. The run ends by listing where everything went. [Tuning screen](docs/reference.md#tuning-screen)
-lists every command.
+The screen opens with a table of every setting and what it does. Below it, a summary
+redraws after each change. A short session looks like this (illustrative; your numbers will
+differ):
+
+~~~text
+bursts mode: target none of 612 bursts (from 1,840 photos) selects 0 photos.
+Type a change, 'show', or 'help' (Enter on an empty line exports): 10%
+bursts mode: target 10% of 612 bursts (from 1,840 photos) selects 61 photos.
+  lowest selected score 4.40; last change: 61 in, 0 out; export copies 122 files, 3.1 GiB.
+Type a change, 'show', or 'help' (Enter on an empty line exports): burst-sharpness 2.5
+bursts mode: target 10% of 612 bursts (from 1,840 photos) selects 61 photos.
+  lowest selected score 3.95; last change: 4 in, 4 out; export copies 122 files, 3.1 GiB.
+Type a change, 'show', or 'help' (Enter on an empty line exports): show
+Preview of the photos that crossed the cut with your last change: 4 in, 4 out, ready in
+0.6 s at D:\Photos\Shoot\.photo-cull\run_20261117_201500_000000\preview
+Type a change, 'show', or 'help' (Enter on an empty line exports):
+~~~
+
+The last line is an empty Enter, which exports the 61 photos.
+
+#### A typical session
+
+1. Type how many to export: a count such as `60`, or a percentage such as `10%`.
+2. Keep `bursts` mode to get one frame per burst, or type `mode photos` to rank every frame
+   on its own. A percentage is a share of bursts or of photos to match.
+3. Type `show`. Explorer or Finder opens the run's `preview` folder. `in` holds the photos
+   just inside the cut and `out` the photos just outside it. After a change, they hold the
+   photos that change added and removed.
+4. If `out` holds photos you'd keep, raise the target or change a weight (see below), then
+   type `show` again.
+5. Press Enter on an empty line to export.
+
+#### Read the summary
+
+| Part | Meaning |
+| --- | --- |
+| `target 10% of 612 bursts (from 1,840 photos) selects 61 photos` | Your target, what it's a share of, and how many photos it picks. |
+| `lowest selected score 4.40` | The score of the weakest photo that made the cut. Photos below it aren't exported. |
+| `last change: 4 in, 4 out` | How many photos your last change added and removed. `show` lets you see them. |
+| `export copies 122 files, 3.1 GiB` | What the export would copy: RAW files, matching JPEGs, and sidecars. |
+
+A yellow line warns you when your count is larger than the number of bursts (it's capped)
+or when feedback keeps alone exceed it.
+
+#### Which setting to change
+
+Weights run from 0 to 3. 0 ignores a factor, and a higher weight makes it count more. These
+are starting points, not tuned values:
+
+| If the picks... | Try |
+| --- | --- |
+| include soft frames from bursts | `burst-sharpness 2.5` |
+| include soft single shots | `sharpness 1` |
+| favor clean but dull photos | `appeal 1.5` or `quality 0.5` |
+| include blown skies or black shadows | `exposure 2` |
+| drop good photos for slight clipping | `exposure 0.5` |
+| hold look-alikes from separate bursts | `diversity 0.25` or `bursts looser` |
+| treat different moments as one burst | `bursts tighter` |
+| should ignore visual appeal entirely | `appeal 0` |
+
+Type `start wildlife`, `start portrait`, or `start landscape` to load a preset's weights in
+one step. Type `help` for every command, or `settings` to see the table again.
+
+After an export, an `Exported Photos` table lists each photo and why it was chosen. The run
+ends by listing where everything went, and `run.json` records the settings you chose under
+`selection_settings`. To reuse them without the screen, pass them as options, for example
+`--select 10% --weight burst-sharpness=2.5`. [Tuning screen](docs/reference.md#tuning-screen)
+in the reference lists every command and rule.
 
 ### 4. Find your picks
 
@@ -459,8 +516,18 @@ camera or RAW variant yet. Update the locked dependencies only in a tested devel
 branch.
 
 **Nothing is exported.** Without a terminal, Photo Cull shows no tuning screen and exports
-nothing unless you pass `--select`. In the tuning screen, set a target before you press
-Enter. Also check your feedback file for `reject` decisions.
+nothing unless you pass `--select`. In the tuning screen, the target starts at `none`: type
+a count or a percentage before you press Enter on an empty line.
+
+**The tuning screen doesn't appear.** It needs a terminal for both input and output, and it
+is skipped when you pass `--select`. Run Photo Cull directly in Windows Terminal, PowerShell,
+or the macOS Terminal, without redirecting its input or output.
+
+**`show` says the preview is off.** You ran with `--contact-sheet 0`, which turns off
+thumbnails. Run again without it; the scores are reused.
+
+**`show` doesn't open a window.** The summary prints the preview folder's path. Open that
+folder yourself; its `in` and `out` folders hold the photos. Also check your feedback file for `reject` decisions.
 
 **The review page forgot my decisions.** The browser saves them for each run, but only in
 that browser on that computer, and not at all if it blocks local storage. Select

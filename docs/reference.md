@@ -696,10 +696,25 @@ Evaluation is the slow part of a run. The tuning screen lets you set the export 
 because every change only rescores, regroups, or reselects the stored metrics. A change
 redraws in well under a second and loads no model.
 
-The screen first lists every setting with its value and a one-line description, then a
-summary: the mode, the target, how many photos it selects, the score at the cut, how many
-photos entered and left the selection with your last change, and how many files and bytes
-the export would copy. It warns when a count is capped or when feedback keeps exceed it.
+The screen first lists every setting with its value and a one-line description, then the
+commands. Each command is one line finished with Enter. An empty line exports. After each
+change, a summary redraws:
+
+~~~text
+bursts mode: target 10% of 612 bursts (from 1,840 photos) selects 61 photos.
+  lowest selected score 4.40; last change: 4 in, 4 out; export copies 122 files, 3.1 GiB.
+~~~
+
+| Part | Meaning |
+| --- | --- |
+| Mode and target | The counting mode, the target, its base (bursts or photos), the photo count, and the number selected. |
+| `lowest selected score` | The composite score of the weakest selected photo that is not a feedback keep. |
+| `last change` | How many photos the last change added to and removed from the selection. |
+| `export copies` | The files and bytes the export would copy, counting whole asset families. |
+
+A warning line follows when a count is capped at the number of candidates, when feedback
+keeps exceed the requested count, or when feedback rejects leave fewer eligible photos than
+requested.
 
 | Input | Result |
 | --- | --- |

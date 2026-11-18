@@ -303,8 +303,8 @@ class LoopTests(unittest.TestCase):
         self.assertIn("Type 'help'", self.warnings[0])
         output = self.stream.getvalue()
         self.assertIn("Selection settings", output)
-        self.assertIn("score at the cut 4.00", output)
-        self.assertIn("+2 in, -0 out", output)
+        self.assertIn("lowest selected score 4.00", output)
+        self.assertIn("last change: 2 in, 0 out", output)
 
     def test_end_of_input_exports_nothing(self) -> None:
         final, result = self.run_loop(["3"])

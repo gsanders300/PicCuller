@@ -551,8 +551,8 @@ The tuning screen accepts the same targets and these commands:
 | EOF | Accept the settings with a target of `none` |
 
 After each change, the summary states the mode, target, base, photo count, selected
-count, score at the cut, photos that entered and left, and the files and bytes the export
-would copy. It warns when a count is capped and when feedback keeps exceed the requested
+count, lowest selected score among non-keeps, photos that entered and left, and the files
+and bytes the export would copy. It warns when a count is capped and when feedback keeps exceed the requested
 count. A change only regroups, rescores, and reselects stored metrics; it loads no model.
 The preview reuses the shared thumbnail store, warms the thumbnails nearest the cut in
 background threads, copies thumbnails rather than linking originals, and is off with

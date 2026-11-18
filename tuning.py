@@ -390,7 +390,10 @@ def changes(
     return entered[:limit], left[:limit], len(entered), len(left)
 
 
-PROMPT = "[bold yellow]Setting, target, 'show', 'help', or Enter to export: [/bold yellow]"
+PROMPT = (
+    "[bold yellow]Type a change, 'show', or 'help' (Enter on an empty line exports): "
+    "[/bold yellow]"
+)
 
 
 def run_tuning_loop(
@@ -456,7 +459,14 @@ def run_tuning_loop(
 def settings_table(settings: TuningSettings) -> Any:
     from rich.table import Table
 
-    table = Table(title="Selection settings", header_style="bold magenta")
+    table = Table(
+        title="Selection settings",
+        caption=(
+            f"Weights run from 0 to {MAX_WEIGHT:g}. 0 ignores a factor, and a higher weight "
+            "makes it count more. Only the ratios between weights change the order."
+        ),
+        header_style="bold magenta",
+    )
     table.add_column("Setting", no_wrap=True)
     table.add_column("Value", justify="right", no_wrap=True)
     table.add_column("What it does", overflow="fold")
@@ -468,11 +478,7 @@ def settings_table(settings: TuningSettings) -> Any:
     table.add_row("target", settings.target, "A count, a percentage, 'all', or 'none'.")
     weights = settings.weights()
     for slider in SLIDERS:
-        table.add_row(
-            slider.name,
-            f"{weights[slider.name]:g}",
-            f"{slider.description} 0 ignores it; higher is harsher.",
-        )
+        table.add_row(slider.name, f"{weights[slider.name]:g}", slider.description)
     table.add_row("diversity", f"{settings.diversity:g}", "Prefer photos that look different.")
     table.add_row(
         "bursts",
@@ -492,9 +498,9 @@ def summary_text(
     count = len(selection.selected)
     lines = [
         (
-            f"[bold]{settings.mode} mode:[/bold] target {settings.target} of {selection.base} "
-            f"{unit} (from {selection.photo_count} photos) selects {count} "
-            f"{'photo' if count == 1 else 'photos'}."
+            f"[bold]{settings.mode} mode:[/bold] target {settings.target} of "
+            f"{selection.base:,} {unit} (from {selection.photo_count:,} photos) selects "
+            f"{count:,} {'photo' if count == 1 else 'photos'}."
         )
     ]
     details = []
@@ -504,13 +510,13 @@ def summary_text(
         if str(record["file_path"]) not in selection.keep_paths
     ]
     if ranked:
-        details.append(f"score at the cut {min(ranked):.2f}")
+        details.append(f"lowest selected score {min(ranked):.2f}")
     if change is not None:
-        details.append(f"+{change[2]} in, -{change[3]} out")
+        details.append(f"last change: {change[2]} in, {change[3]} out")
     files, size = sizes.total(selection.selected_paths)
     if selection.selected:
         noun = "file" if files == 1 else "files"
-        details.append(f"export copies {files} {noun}, {_format_size(size)}")
+        details.append(f"export copies {files:,} {noun}, {_format_size(size)}")
     if details:
         lines.append("  " + "; ".join(details) + ".")
     keeps = len(selection.keep_paths)
@@ -592,13 +598,14 @@ def _format_size(count: int) -> str:
 
 def help_text() -> str:
     return (
-        "Type a target ('60', '10%', 'all', 'none'), or a setting and a value:\n"
-        "  mode bursts|photos   bursts counts each burst once; photos counts every photo\n"
+        "Type one change per line and press Enter. The summary redraws after each one.\n"
+        "  60, 10%, all, none    how many to export\n"
+        "  mode bursts|photos    bursts counts each burst once; photos counts every photo\n"
         "  bursts tighter|normal|looser\n"
-        f"  <weight> 0-{MAX_WEIGHT:g}       {', '.join(SLIDER_BY_NAME)}\n"
-        "  diversity 0-1        prefer photos that look different\n"
-        f"  start <preset>       load the weights of {', '.join(sorted(SCORING_PROFILES))}\n"
-        "  show                 open the photos that crossed the cut in your file manager\n"
-        "  settings             list every setting again\n"
-        "Press Enter to export with these settings."
+        f"  <weight> 0-{MAX_WEIGHT:g}          {', '.join(SLIDER_BY_NAME)}\n"
+        "  diversity 0-1         prefer photos that look different\n"
+        f"  start <preset>        load the weights of {', '.join(sorted(SCORING_PROFILES))}\n"
+        "  show                  open the photos near the cut in your file manager\n"
+        "  settings              list every setting again\n"
+        "Press Enter on an empty line to export with these settings."
     )
