@@ -139,21 +139,27 @@ that lost their burst.
 
 This example is illustrative; your names, scores, and reasons will differ.
 
-### 3. Choose how many to export
+### 3. Tune the selection, then export
 
-Photo Cull then asks:
+Photo Cull then shows the tuning screen: every setting with a one-line description, and a
+summary of what the export would hold. Scoring is already done, so each change redraws the
+summary in well under a second. Type a change and press Enter:
 
-~~~text
-How many photos to export, best first? (1-2, 'all', or Enter for none):
-~~~
+- Type a **count** or a **percentage**, such as `60` or `10%`, to set how many to export.
+- Type `mode bursts` to count each burst as one shot (the default), or `mode photos` to
+  rank every photo on its own. A percentage is of bursts or of photos to match.
+- Type a **weight**, such as `sharpness 1.5` or `exposure 0.5`, to change how much a factor
+  counts. `0` ignores it. `start wildlife` loads a preset's weights.
+- Type `show` to open the photos that just crossed the cut in Explorer or Finder.
+- Press **Enter** on an empty line to export with the current settings. The target starts
+  at `none`, so pressing Enter straight away exports nothing. The reports are still
+  written, so you can look first and export later.
 
-- Press **Enter** to export nothing. The reports are still written, so you can look first
-  and export later.
-- Type a **number** to export that many burst winners, best first.
-- Type **all** to export every burst winner.
-
-After an export, an `Exported Photos` table lists each photo and why it was chosen. The run
-ends by listing where everything went.
+The summary shows how many photos the target selects, the score at the cut, how many
+photos entered and left with your last change, and how many files and gigabytes the export
+would copy. After an export, an `Exported Photos` table lists each photo and why it was
+chosen. The run ends by listing where everything went. [Tuning screen](docs/reference.md#tuning-screen)
+lists every command.
 
 ### 4. Find your picks
 
@@ -180,10 +186,22 @@ uv run photo-cull /photos --select none
 
 All reports are still written.
 
-**Export a fixed number without the prompt** (for scripts and logs):
+**Export a fixed number without the tuning screen** (for scripts and logs):
 
 ~~~text
 uv run photo-cull /photos --select 30 --plain
+~~~
+
+**Export a share of the shoot,** here the best 10 percent of all photos, bursts or not:
+
+~~~text
+uv run photo-cull /photos --select 10% --mode photos
+~~~
+
+**Change a weight without the tuning screen,** here ignoring visual appeal:
+
+~~~text
+uv run photo-cull /photos --select 40 --weight appeal=0
 ~~~
 
 **Skip the review page** if you don't use a browser. This also skips making thumbnails:
@@ -286,7 +304,8 @@ between 0 and 1:
 **3. Pick burst winners.** The highest score in each burst wins. Only winners appear in the
 table and in the default export.
 
-**4. Build the export.** Your count takes that many winners in score order. Feedback then
+**4. Build the export.** Your count takes that many winners in score order, or that many
+photos with `mode photos`. Feedback then
 applies: photos you marked `keep` are always exported and count toward your number, and
 photos you marked `reject` never are. With `--diversity`, a lower-ranked winner can replace
 one that looks too much like a photo already chosen.
@@ -326,6 +345,7 @@ Each run folder contains:
 | `picks/` | Your exported photos with their families. Present only when you export something. |
 | `evaluation.csv` | Every photo's scores, ranks, burst, reason, and each score factor. Open it in a spreadsheet to see why anything ranked where it did. |
 | `review.html` | A thumbnail page for a web browser that shows each burst whole, where you can mark keeps and rejects. |
+| `preview/` | Thumbnails of the photos near the cut, written when you type `show` in the tuning screen. |
 | `feedback.csv` | A decision template listing every photo, with the current selection marked `keep`. |
 | `failures.csv` | Any photo that couldn't be read or scored, and why. Empty when all went well. |
 | `run.json` | A full audit of the run: settings, model versions, counts, and timings. |
@@ -384,8 +404,8 @@ decisions are the one thing that would let the preset weights be tuned properly.
 ## Stop and resume
 
 Press **Ctrl+C** to stop at any time. Every photo already evaluated is saved, so running the
-same command again picks up where it left off. The metrics file is written before the export
-question, so stopping at the prompt loses nothing either.
+same command again picks up where it left off. The metrics file is written before the tuning
+screen, so stopping there loses nothing either.
 
 Photo Cull exits with code 0 on success, 1 when the run fails, 2 for a bad option or path,
 and 130 when you stop it. See
@@ -438,8 +458,9 @@ every model again.
 camera or RAW variant yet. Update the locked dependencies only in a tested development
 branch.
 
-**Nothing is exported.** Without a terminal, Photo Cull asks nothing and exports nothing
-unless you pass `--select`. Also check your feedback file for `reject` decisions.
+**Nothing is exported.** Without a terminal, Photo Cull shows no tuning screen and exports
+nothing unless you pass `--select`. In the tuning screen, set a target before you press
+Enter. Also check your feedback file for `reject` decisions.
 
 **The review page forgot my decisions.** The browser saves them for each run, but only in
 that browser on that computer, and not at all if it blocks local storage. Select

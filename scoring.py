@@ -17,6 +17,7 @@ REASON_STANDING_PERCENT = 25
 @dataclass(frozen=True, slots=True)
 class ScoringProfile:
     name: str
+    aesthetic_weight: float = 1.0
     absolute_focus_floor: float = ABSOLUTE_FOCUS_FLOOR
     absolute_focus_weight: float = 1.0
     relative_focus_exponent: float = 1.5
@@ -144,8 +145,9 @@ def calculate_composite_score(
     relative_focus_ratio: float = 1.0,
     profile: ScoringProfile | None = None,
 ) -> float:
-    """Combine bounded technical gates with the aesthetic score."""
-    composite = max(0.0, float(record["aesthetic_score"]))
+    """Combine bounded technical gates with the weighted aesthetic score."""
+    profile = profile or SCORING_PROFILES["balanced"]
+    composite = max(0.0, float(record["aesthetic_score"])) ** profile.aesthetic_weight
     for multiplier in score_multipliers(record, relative_focus_ratio, profile).values():
         composite *= multiplier
     return composite
@@ -230,12 +232,18 @@ def group_bursts(
     return labeled_records
 
 
-def describe_score_reasons(records: list[dict[str, Any]], *, grouped: bool = True) -> None:
+def describe_score_reasons(
+    records: list[dict[str, Any]],
+    *,
+    grouped: bool = True,
+    aesthetic_weight: float = 1.0,
+) -> None:
     """Add a plain-language `score_reason` to each ranked record.
 
     The reason states the burst decision, the photograph's standing among all
     candidates, and each penalty large enough to matter. Records must already
-    carry burst ranks and score multipliers.
+    carry burst ranks and score multipliers. `aesthetic_weight` must be the one
+    the composite used, so the factor named as the main difference is correct.
     """
     by_burst: dict[int, list[dict[str, Any]]] = {}
     for record in records:
@@ -250,7 +258,9 @@ def describe_score_reasons(records: list[dict[str, Any]], *, grouped: bool = Tru
     for record in records:
         clauses = []
         if grouped:
-            clauses.append(_burst_clause(record, by_burst[int(record["burst_id"])]))
+            clauses.append(
+                _burst_clause(record, by_burst[int(record["burst_id"])], aesthetic_weight)
+            )
         clauses.extend(_standing_clauses(record, sorted_values))
         clauses.extend(_penalty_clauses(record))
         record["score_reason"] = "; ".join(clauses) or "no standout strength or penalty"
@@ -263,14 +273,18 @@ _STANDING_FIELDS = (
 )
 
 
-def _burst_clause(record: dict[str, Any], group: list[dict[str, Any]]) -> str:
+def _burst_clause(
+    record: dict[str, Any],
+    group: list[dict[str, Any]],
+    aesthetic_weight: float = 1.0,
+) -> str:
     size = len(group)
     if size == 1:
         return "single shot"
     rank = int(record["burst_rank"])
     if rank == 1:
         runner_up = group[1]
-        gap = _score_gap(record, runner_up)
+        gap = _score_gap(record, runner_up, aesthetic_weight)
         if gap is None:
             return (
                 f"best of {size} in burst; ties {runner_up['file_name']} on score "
@@ -283,14 +297,18 @@ def _burst_clause(record: dict[str, Any], group: list[dict[str, Any]]) -> str:
         )
     winner = group[0]
     position = f"{_ordinal(rank)} of {size} in burst"
-    gap = _score_gap(winner, record)
+    gap = _score_gap(winner, record, aesthetic_weight)
     if gap is None:
         return f"{position}; ties {winner['file_name']} on score and loses on path order"
     amount, factor = gap
     return f"{position}; scored {amount} lower than {winner['file_name']}{factor}"
 
 
-def _score_gap(better: dict[str, Any], worse: dict[str, Any]) -> tuple[str, str] | None:
+def _score_gap(
+    better: dict[str, Any],
+    worse: dict[str, Any],
+    aesthetic_weight: float = 1.0,
+) -> tuple[str, str] | None:
     """Return how far `worse` trails `better`, and the factor that differs most."""
     high = float(better["composite_score"])
     low = float(worse["composite_score"])
@@ -305,8 +323,8 @@ def _score_gap(better: dict[str, Any], worse: dict[str, Any]) -> tuple[str, str]
         amount = f"{percent:.0f}%"
     else:
         amount = "less than 1%"
-    better_factors = _comparison_factors(better)
-    worse_factors = _comparison_factors(worse)
+    better_factors = _comparison_factors(better, aesthetic_weight)
+    worse_factors = _comparison_factors(worse, aesthetic_weight)
     main_factor, largest_ratio = "", 1.0
     for name, value in better_factors.items():
         other = worse_factors[name]
@@ -316,10 +334,10 @@ def _score_gap(better: dict[str, Any], worse: dict[str, Any]) -> tuple[str, str]
     return amount, f", mainly on {main_factor}" if main_factor else ""
 
 
-def _comparison_factors(record: dict[str, Any]) -> dict[str, float]:
+def _comparison_factors(record: dict[str, Any], aesthetic_weight: float = 1.0) -> dict[str, float]:
     """Group the composite's terms into the factors a photographer would name."""
     return {
-        "aesthetic": max(0.0, float(record["aesthetic_score"])),
+        "aesthetic": max(0.0, float(record["aesthetic_score"])) ** aesthetic_weight,
         "sharpness": float(record["absolute_focus_multiplier"])
         * float(record["relative_focus_multiplier"]),
         "technical quality": float(record["musiq_multiplier"]),

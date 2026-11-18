@@ -1003,6 +1003,103 @@ class CacheWriteFailureTests(unittest.TestCase):
             self.assertEqual(len(read_rows(run_dir / "evaluation.csv")), 1)
 
 
+class SelectionModeTests(unittest.TestCase):
+    def test_photos_mode_takes_a_percentage_of_every_photo(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source, output = root / "photos", root / "output"
+            make_photos(source)
+
+            exit_code = run_with_mocks(
+                build_config(source, output, selection="50%", mode="photos", write_xmp=False)
+            )
+
+            run_dir = latest_run(output)
+            manifest = read_manifest(run_dir)
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(manifest["counts"]["selected"], 1)
+            self.assertEqual(manifest["selection_settings"]["mode"], "photos")
+            self.assertEqual(manifest["selection_settings"]["target"], "50%")
+            self.assertEqual(manifest["selection_settings"]["requested"], 1)
+
+    def test_weight_overrides_reach_the_score_and_the_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source, output = root / "photos", root / "output"
+            make_photos(source)
+
+            exit_code = run_with_mocks(
+                build_config(
+                    source, output, selection="none", weights=(("appeal", 0.0), ("quality", 0.0))
+                )
+            )
+
+            run_dir = latest_run(output)
+            manifest = read_manifest(run_dir)
+            rows = read_rows(run_dir / "evaluation.csv")
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(manifest["selection_settings"]["weights"]["appeal"], 0.0)
+            self.assertEqual(manifest["selection_settings"]["scoring_profile"]["musiq_weight"], 0.0)
+            for row in rows:
+                product = 1.0
+                for field in cull.SCORE_MULTIPLIER_FIELDS:
+                    product *= float(row[field])
+                self.assertAlmostEqual(float(row["composite_score"]), product)
+
+    def test_the_tuning_screen_drives_an_interactive_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            source, output = root / "photos", root / "output"
+            make_photos(source)
+            stream = io.StringIO()
+            test_console = Console(
+                file=stream, force_terminal=True, no_color=True, highlight=False, width=200
+            )
+            config = build_config(source, output, selection=None, write_xmp=False)
+
+            with (
+                patch.object(cull, "console", test_console),
+                patch.object(test_console, "input", side_effect=["mode photos", "1", ""]),
+                patch.object(cull.sys, "stdin", SimpleNamespace(isatty=lambda: True)),
+            ):
+                exit_code = run_with_mocks(config)
+
+            run_dir = latest_run(output)
+            manifest = read_manifest(run_dir)
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(manifest["counts"]["selected"], 1)
+            self.assertEqual(manifest["selection_settings"]["mode"], "photos")
+            self.assertEqual(manifest["selection_settings"]["target"], "1")
+            self.assertEqual(len(list((run_dir / "picks").rglob("*.jpg"))), 1)
+            rendered = stream.getvalue()
+            self.assertIn("Selection settings", rendered)
+            self.assertIn("target 1 of 2 photos (from 2 photos) selects 1 photo.", rendered)
+
+    def test_reranking_clears_a_lost_selection_rank(self) -> None:
+        first = {"file_path": "/a", "burst_id": 1, "composite_score": 2.0}
+        second = {"file_path": "/b", "burst_id": 1, "composite_score": 1.0}
+        records = [first, second]
+        cull._assign_ranks(records)
+        self.assertEqual(first["selection_rank"], 1)
+
+        first["composite_score"] = 0.5
+        cull._assign_ranks(records)
+
+        self.assertEqual((first["selection_rank"], second["selection_rank"]), ("", 1))
+
+    def test_a_bad_weight_fails_before_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            stream = io.StringIO()
+            test_console = Console(file=stream, force_terminal=False, no_color=True)
+            with patch("cull.Console", return_value=test_console):
+                exit_code = cull.main([str(root), "--weight", "focus=1"])
+
+            self.assertEqual(exit_code, 2)
+            self.assertIn("Unknown weight", stream.getvalue())
+            self.assertFalse((root / ".photo-cull").exists())
+
+
 class ReportBeforePromptTests(unittest.TestCase):
     def test_evaluation_csv_survives_an_interrupt_at_the_selection_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

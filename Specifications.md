@@ -189,7 +189,7 @@ is a statement about the photograph, so it does reduce the factor.
 For scoring profile exponents `w` and relative focus exponent `r`:
 
 ```text
-Composite = max(0, Aesthetic)
+Composite = max(0, Aesthetic) ^ w_aesthetic
             × F_absolute ^ w_absolute_focus
             × F_relative ^ r
             × clip(MUSIQ / 100, 0, 1) ^ w_musiq
@@ -201,10 +201,14 @@ Composite = max(0, Aesthetic)
 1. Preset weights are defined in `scoring.py`, included in `run.json`, and deliberately
    treated as heuristics requiring validation against human feedback.
 2. `score_multipliers` returns the six weighted terms after the aesthetic base. The
-   composite multiplies them left to right, so the stored `*_multiplier` columns
-   reproduce `composite_score` exactly.
+   composite multiplies them left to right, so the stored `*_multiplier` columns and the
+   aesthetic score raised to `w_aesthetic` reproduce `composite_score` exactly. Every
+   preset sets `w_aesthetic` to 1.
 3. Explanations add no cache field and change no per-image metric, so they need no
    algorithm-version increment.
+4. The tuning screen and `--weight` replace individual weights for one run. A weight
+   changes no per-image metric, so it is not part of the cache identity. `run.json`
+   records the weights a selection used under `selection_settings`.
 
 ### Score reasons
 
@@ -437,14 +441,16 @@ append-with-flush; every other report keeps atomic replacement.
 
 1. `evaluation.csv` is written atomically and retains full-precision metrics. Display
    rounding occurs only in the terminal and the review page.
-2. It is written once before the export prompt, so a completed evaluation pass survives
+2. It is written once before the tuning screen, so a completed evaluation pass survives
    an interrupt or a rejected selection value.
-3. It is rewritten after selection with the `portfolio_selected` column populated.
+3. It is rewritten after selection with the final settings' ranks and the
+   `portfolio_selected` column populated.
 
 ## 7. Terminal interface
 
 Photo Cull uses a streaming Rich interface. It does not use an alternate screen, mouse
-input, menus, or cursor navigation. Output remains in the terminal history.
+input, or cursor navigation. The tuning screen reads typed commands. Output remains in the
+terminal history.
 
 ### 7.1 Terminal modes
 
@@ -454,12 +460,12 @@ Display mode and selection-input mode are independent.
 | --- | --- | --- |
 | Rich display | The console is a terminal and `--plain` is absent | Use color, animated phase status, and live evaluation progress |
 | Static display | `--plain` is set or the console is not a terminal | Use static phase messages and one durable progress line per evaluation batch |
-| Interactive selection | Standard input and the console are terminals, and `--select` is absent | Ask for an export count |
-| Non-interactive selection | `--select` is present or either stream is not a terminal | Use `--select`; request zero automatic selections when it is absent |
+| Interactive selection | Standard input and the console are terminals, and `--select` is absent | Show the tuning screen |
+| Non-interactive selection | `--select` is present or either stream is not a terminal | Use `--select`, `--mode`, and `--weight`; request zero automatic selections when `--select` is absent |
 
 For example, redirecting standard input while leaving output attached to a terminal keeps
-the Rich display but disables the prompt. `--plain` in a normal terminal disables Rich
-animation but does not disable the prompt.
+the Rich display but disables the tuning screen. `--plain` in a normal terminal disables
+Rich animation but does not disable the tuning screen.
 
 `--plain` changes presentation only. It does not change discovery, evaluation, ranking,
 selection, reporting, export, exit codes, or selection-input mode.
@@ -493,14 +499,14 @@ The interface presents information in this order:
    selection rank, path relative to the source root, composite score, and score reason.
    Long paths and reasons wrap rather than truncate. After the table, show the shown,
    winner, and candidate counts and a one-line statement of how the score is formed.
-10. Write `evaluation.csv` before any interactive selection prompt. An interrupt or a bad
-    count at the prompt therefore does not discard completed metrics.
-11. Prompt for a count only in interactive selection mode. When the feedback file has
-    keeps, first state their number and that they count toward the requested number.
+10. Write `evaluation.csv` before the tuning screen. An interrupt or a bad answer there
+    therefore does not discard completed metrics.
+11. Show the tuning screen only in interactive selection mode: the settings table, the
+    commands, and a summary that redraws after each change (section 7.3).
 12. Generate the feedback and review artifacts, then export. If the selection is empty,
     state that no photos were exported. Otherwise, show the `Exported Photos` table:
-    selection order, relative path, score, and `burst winner #N` or
-    `marked keep in feedback`, at most 20 rows, with a count of any further rows. When
+    selection order, relative path, score, and `burst winner #N`, `quality rank #N` in
+    `photos` mode, or `marked keep in feedback`, at most 20 rows, with a count of any further rows. When
     `--diversity` is above zero, add a note that diversity can replace a winner with a
     lower-ranked one.
 13. When the run completes, show the run-directory path and one line for each principal
@@ -516,21 +522,46 @@ Display rules:
 
 ### 7.3 Selection input
 
-Selection input is case-insensitive and ignores surrounding space.
+Selection input is case-insensitive and ignores surrounding space. The base of a target is
+the burst-winner count in `bursts` mode and the photo count in `photos` mode.
 
 | Input | Result |
 | --- | --- |
-| Enter, `none`, `skip`, or `0` | Request zero automatic selections; feedback keeps still apply |
-| `all` | Set the requested count to the burst-winner count; feedback still applies |
-| Integer from 1 through the winner count | Request that many selection slots |
+| `none`, `skip`, `0`, or `0%` | Request zero automatic selections; feedback keeps still apply |
+| `all` | Set the requested count to the base; feedback still applies |
+| Integer from 1 through the base | Request that many selection slots |
+| Percentage above 0 and at most 100 | Request that share of the base, rounded half up, at least 1 |
 | Malformed explicit `--select` value | Fail during initial configuration validation |
-| Malformed interactive value | Show the error and prompt again |
-| Explicit integer larger than the winner count | Fail after ranking, when the available count is known |
-| Interactive integer larger than the winner count | Show the valid range and prompt again |
+| Explicit integer larger than the base | Fail after ranking, when the base is known |
+
+The tuning screen accepts the same targets and these commands:
+
+| Input | Result |
+| --- | --- |
+| `mode bursts` or `mode photos` | Change the counting mode |
+| A weight name and a value from 0 to 3 | Replace that weight (section 3, Composite) |
+| `diversity` and a value from 0 to 1 | Change the diversity |
+| `bursts tighter`, `normal`, or `looser` | Scale both burst time limits by 0.5 or 2 and move the pHash threshold by 2 and the CLIP threshold by 0.04, clamped to their ranges |
+| `start` and a preset name | Load that preset's weights; subject prompts and eye data stay those of `--preset` |
+| `show` | Copy the thumbnails of the photos that crossed the cut with the last change, or of the photos just above and below the cut, into `preview/in` and `preview/out`, at most 25 each, and open the folder |
+| `settings` or `help` | Print the settings table or the commands |
+| Enter | Accept the settings and continue to export |
+| Malformed or out-of-range value | Show the error and ask again; settings are unchanged |
+| Integer larger than the base | Cap at the base and say so in the summary |
+| EOF | Accept the settings with a target of `none` |
+
+After each change, the summary states the mode, target, base, photo count, selected
+count, score at the cut, photos that entered and left, and the files and bytes the export
+would copy. It warns when a count is capped and when feedback keeps exceed the requested
+count. A change only regroups, rescores, and reselects stored metrics; it loads no model.
+The preview reuses the shared thumbnail store, warms the thumbnails nearest the cut in
+background threads, copies thumbnails rather than linking originals, and is off with
+`--contact-sheet 0`. On exit, queued preview decodes are cancelled and running ones
+complete.
 
 Feedback keeps and rejects still apply after the count is read. Forced keeps can make the
-selection larger than the requested count. EOF at the interactive prompt is equivalent to
-`none`. A supplied `--select` value always bypasses the prompt.
+selection larger than the requested count. A supplied `--select` value always bypasses
+the tuning screen.
 
 ### 7.4 Warnings, errors, and interruption
 
@@ -578,8 +609,8 @@ Automated terminal-interface tests must cover these cases:
    per-batch evaluation progress.
 4. Explicit `--select` values never prompt. Missing `--select` never reads input in
    non-interactive selection mode.
-5. Enter, aliases, `all`, valid counts, malformed values, out-of-range counts, repeated
-   prompts, and EOF have the results in section 7.3.
+5. Aliases, `all`, valid counts, percentages, malformed values, out-of-range counts,
+   tuning commands, repeated input, Enter, and EOF have the results in section 7.3.
 6. Ctrl+C during evaluation and at the prompt returns 130, preserves completed cache
    records, and records the final audit status.
 7. Recoverable warnings remain visible while later progress and results continue.
@@ -598,8 +629,8 @@ page and the validator close the loop with human decisions.
 
 ### Selection rules
 
-1. The candidate pool is every burst winner plus every feedback `keep` that is not a
-   winner.
+1. In `bursts` mode, the candidate pool is every burst winner plus every feedback `keep`
+   that is not a winner. In `photos` mode, it is every photo.
 2. A `reject` removes a candidate. A later `--feedback` CSV pins keeps and removes
    rejects.
 3. The target count is the requested count or the number of keeps, whichever is larger,

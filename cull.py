@@ -65,6 +65,22 @@ from scoring import (
     score_multipliers,
 )
 from thumbnail_store import ThumbnailStore
+from tuning import (
+    MAX_WEIGHT,
+    MODES,
+    SLIDER_BY_NAME,
+    BurstRules,
+    FamilySizes,
+    Preview,
+    Selection,
+    TuningSettings,
+    apply_weights,
+    burst_rules,
+    parse_target,
+    parse_weight,
+    resolve_target,
+    run_tuning_loop,
+)
 from xmp_rating import rating_for_rank, write_xmp_rating
 
 console = Console()
@@ -143,6 +159,8 @@ class PipelineConfig:
     plain: bool
     debug: bool
     check_model_updates: bool = True
+    mode: str = "bursts"
+    weights: tuple[tuple[str, float], ...] = ()
 
     def audit_dict(self) -> dict[str, Any]:
         values = asdict(self)
@@ -525,28 +543,19 @@ def _execute_pipeline(
 
     _report_timestamp_sources(records, metadata_backend, audit)
     audit.set_phase("ranking")
-    assign_session_focus_factors(records, profile)
-    if config.no_group:
-        for burst_id, record in enumerate(_timestamp_order(records), start=1):
-            record["burst_id"] = burst_id
-            record["burst_size"] = 1
-            record["relative_focus_factor"] = 1.0
-            record.update(score_multipliers(record, profile=profile))
-            record["composite_score"] = calculate_composite_score(
-                record,
-                profile=profile,
-            )
-    else:
-        group_bursts(
-            records,
-            time_window_seconds=config.time_window,
-            phash_threshold=config.phash_threshold,
-            sim_threshold=config.sim_threshold,
-            max_burst_duration_seconds=config.max_burst_duration,
-            profile=profile,
-        )
-    winners = _assign_ranks(records)
-    describe_score_reasons(records, grouped=not config.no_group)
+    base_rules = BurstRules(
+        config.time_window,
+        config.max_burst_duration,
+        config.phash_threshold,
+        config.sim_threshold,
+    )
+    settings = TuningSettings(
+        mode=config.mode,
+        target="none" if config.selection is None else parse_target(config.selection),
+        profile=apply_weights(profile, config.weights),
+        diversity=config.diversity,
+    )
+    winners = _rank_records(records, settings.profile, None if config.no_group else base_rules)
     audit.set_count("winners", len(winners))
 
     for record in records:
@@ -565,25 +574,25 @@ def _execute_pipeline(
     audit.add_output("evaluation", evaluation_file)
 
     audit.set_phase("awaiting_selection")
-    keep_count = sum(record["feedback_decision"] == "keep" for record in records)
-    requested_count = _selection_count(config.selection, len(winners), keep_count)
-    candidate_pool = list(winners)
-    candidate_paths = {record["file_path"] for record in candidate_pool}
-    candidate_pool.extend(
-        record
-        for record in records
-        if feedback.get(record["file_path"]) == "keep"
-        and record["file_path"] not in candidate_paths
-    )
-    selected = select_portfolio_candidates(
-        candidate_pool,
-        requested_count,
-        diversity_strength=config.diversity,
-        feedback=feedback,
-    )
-    for order, record in enumerate(selected, start=1):
-        record["portfolio_selected"] = True
-        record["portfolio_selection_order"] = order
+    if config.selection is None and _interactive_selection():
+        settings, selection = _tune_selection(
+            config, folder, output_root, run_dir, records, settings, base_rules, feedback, audit
+        )
+        winners = [record for record in records if record["burst_winner"]]
+        audit.set_count("winners", len(winners))
+    else:
+        keep_count = sum(record["feedback_decision"] == "keep" for record in records)
+        base = len(records) if settings.mode == "photos" else len(winners)
+        requested_count = _selection_count(config.selection, base, keep_count)
+        selection = _select_records(records, winners, settings, feedback, requested_count)
+    selected = list(selection.selected)
+    candidate_pool = list(selection.pool)
+    audit.data["selection_settings"] = {
+        **settings.audit_dict(),
+        "requested": selection.requested,
+        "burst_rules": asdict(burst_rules(base_rules, settings.burst_level)),
+        "scoring_profile": settings.profile.as_dict(),
+    }
     audit.set_count("selected", len(selected))
 
     audit.set_phase("reporting")
@@ -705,7 +714,7 @@ def _execute_pipeline(
         audit.add_output("picks", picks_dir)
         audit.add_output("export_manifest", export_manifest)
 
-        _show_exported(selected, folder, config.diversity)
+        _show_exported(selected, folder, settings.diversity, settings.mode)
         outputs.append(
             (
                 "picks/",
@@ -1034,11 +1043,147 @@ def _assign_ranks(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         (record for record in records if record["burst_winner"]),
         key=_quality_sort_key,
     )
+    for record in records:
+        # Assigned, not defaulted: the tuning screen ranks the same records again,
+        # and a photo that stops winning its burst must lose its old rank.
+        record["selection_rank"] = ""
     for selection_rank, record in enumerate(winners, start=1):
         record["selection_rank"] = selection_rank
-    for record in records:
-        record.setdefault("selection_rank", "")
     return winners
+
+
+def _rank_records(
+    records: list[dict[str, Any]],
+    profile: ScoringProfile,
+    rules: BurstRules | None,
+) -> list[dict[str, Any]]:
+    """Score, group, rank, and explain every record. `None` rules mean no grouping."""
+    assign_session_focus_factors(records, profile)
+    if rules is None:
+        for burst_id, record in enumerate(_timestamp_order(records), start=1):
+            record["burst_id"] = burst_id
+            record["burst_size"] = 1
+            record["relative_focus_factor"] = 1.0
+            record.update(score_multipliers(record, profile=profile))
+            record["composite_score"] = calculate_composite_score(
+                record,
+                profile=profile,
+            )
+    else:
+        group_bursts(
+            records,
+            time_window_seconds=rules.window,
+            phash_threshold=rules.phash_threshold,
+            sim_threshold=rules.sim_threshold,
+            max_burst_duration_seconds=rules.duration,
+            profile=profile,
+        )
+    winners = _assign_ranks(records)
+    describe_score_reasons(
+        records,
+        grouped=rules is not None,
+        aesthetic_weight=profile.aesthetic_weight,
+    )
+    return winners
+
+
+def _select_records(
+    records: list[dict[str, Any]],
+    winners: list[dict[str, Any]],
+    settings: TuningSettings,
+    feedback: dict[str, str],
+    requested: int | None = None,
+) -> Selection:
+    """Select from burst winners or from every photo, and mark the selection.
+
+    `requested` overrides the settings' target; an explicit `--select` count is
+    validated against the available number before it reaches here.
+    """
+    if settings.mode == "photos":
+        pool = _global_quality_order(records)
+        base = len(records)
+    else:
+        pool = list(winners)
+        winner_paths = {record["file_path"] for record in pool}
+        pool.extend(
+            record
+            for record in records
+            if record["feedback_decision"] == "keep" and record["file_path"] not in winner_paths
+        )
+        base = len(winners)
+    capped = False
+    if requested is None:
+        requested, capped = resolve_target(settings.target, base)
+    selected = select_portfolio_candidates(
+        pool,
+        requested,
+        diversity_strength=settings.diversity,
+        feedback=feedback,
+    )
+    for record in records:
+        record["portfolio_selected"] = False
+        record.pop("portfolio_selection_order", None)
+    for order, record in enumerate(selected, start=1):
+        record["portfolio_selected"] = True
+        record["portfolio_selection_order"] = order
+    return Selection(
+        selected=tuple(selected),
+        pool=tuple(pool),
+        base=base,
+        photo_count=len(records),
+        requested=requested,
+        capped=capped,
+        keep_paths=frozenset(
+            record["file_path"] for record in records if record["feedback_decision"] == "keep"
+        ),
+    )
+
+
+def _tune_selection(
+    config: PipelineConfig,
+    folder: Path,
+    output_root: Path,
+    run_dir: Path,
+    records: list[dict[str, Any]],
+    settings: TuningSettings,
+    base_rules: BurstRules,
+    feedback: dict[str, str],
+    audit: RunAudit,
+) -> tuple[TuningSettings, Selection]:
+    """Run the tuning screen, then rank once more under the settings it returns."""
+
+    def evaluate(current: TuningSettings) -> Selection:
+        rules = None if config.no_group else burst_rules(base_rules, current.burst_level)
+        return _select_records(
+            records, _rank_records(records, current.profile, rules), current, feedback
+        )
+
+    preview_store = None
+    preview = None
+    if config.contact_sheet_count > 0:
+        preview_store = ThumbnailStore(output_root / "thumbnails", folder)
+        preview = Preview(run_dir / "preview", preview_store.thumbnail, config.workers)
+    try:
+        settings, _ = run_tuning_loop(
+            console,
+            settings,
+            records,
+            evaluate,
+            console.input,
+            FamilySizes(record["file_path"] for record in records),
+            preview,
+            _warning,
+            grouped=not config.no_group,
+        )
+    finally:
+        if preview is not None:
+            preview.close()
+        if preview_store is not None and preview_store.decoded:
+            audit.accumulate_stage(
+                "thumbnail_decode", preview_store.decode_seconds, preview_store.decoded
+            )
+            audit.data["counts"]["preview_thumbnails_decoded"] = preview_store.decoded
+    return settings, evaluate(settings)
 
 
 def _report_timestamp_sources(
@@ -1209,6 +1354,7 @@ def _show_exported(
     selected: list[dict[str, Any]],
     source_root: Path,
     diversity: float,
+    mode: str = "bursts",
 ) -> None:
     table = Table(title="Exported Photos", header_style="bold magenta")
     table.add_column("#", justify="right", no_wrap=True)
@@ -1223,6 +1369,8 @@ def _show_exported(
             (
                 "marked keep in feedback"
                 if record["feedback_decision"] == "keep"
+                else f"quality rank #{record['global_quality_rank']}"
+                if mode == "photos"
                 else f"burst winner #{record['selection_rank']}"
             ),
         )
@@ -1262,28 +1410,17 @@ def _write_evaluation_csv(destination: Path, records: list[dict[str, Any]]) -> N
     )
 
 
+def _interactive_selection() -> bool:
+    """The tuning screen needs a terminal on both input and output."""
+    return console.is_terminal and sys.stdin.isatty()
+
+
 def _selection_count(value: str | None, available: int, keep_count: int = 0) -> int:
+    """Resolve an explicit `--select`, or the non-interactive default of none."""
     if value is not None:
         return _parse_selection_count(value, available)
 
     keeps = f"{keep_count} {'photo' if keep_count == 1 else 'photos'} marked keep in the feedback file"
-    if console.is_terminal and sys.stdin.isatty():
-        if keep_count:
-            console.print(f"{keeps} will be exported and count toward this number.")
-        prompt = (
-            f"[bold yellow]How many photos to export, best first? "
-            f"(1-{available}, 'all', or Enter for none): [/bold yellow]"
-        )
-        while True:
-            try:
-                entered = console.input(prompt).strip()
-            except EOFError:
-                return 0
-            try:
-                return _parse_selection_count(entered, available)
-            except ValueError as error:
-                _warning(f"{error}. Try again.")
-
     message = "No interactive terminal, so no photos are exported automatically. Use --select."
     if keep_count:
         message += f" {keeps} will still be exported."
@@ -1292,17 +1429,13 @@ def _selection_count(value: str | None, available: int, keep_count: int = 0) -> 
 
 
 def _parse_selection_count(value: str, available: int) -> int:
-    """Convert one explicit or interactive selection value to a count."""
-    normalized = value.strip().casefold()
-    if normalized in {"", "none", "skip", "0"}:
-        return 0
-    if normalized == "all":
-        return available
+    """Convert one explicit selection value to a count of `available`."""
     try:
-        count = int(normalized)
+        target = parse_target(value)
     except ValueError as error:
-        raise ValueError("--select must be a positive integer, 'all', or 'none'") from error
-    if not 1 <= count <= available:
+        raise ValueError(f"--select: {error}") from None
+    count, capped = resolve_target(target, available)
+    if capped:
         raise ValueError(f"Selection count must be between 1 and {available}")
     return count
 
@@ -1334,19 +1467,18 @@ def _validate_selection(value: str | None) -> None:
     """
     if value is None:
         return
-    normalized = value.strip().casefold()
-    if normalized in {"", "none", "skip", "all"}:
-        return
     try:
-        count = int(normalized)
-    except ValueError:
-        raise ValueError("--select must be a positive integer, 'all', or 'none'") from None
-    if count < 0:
-        raise ValueError("--select cannot be negative")
+        parse_target(value)
+    except ValueError as error:
+        raise ValueError(f"--select: {error}") from None
 
 
 def _validate_config(config: PipelineConfig) -> None:
     _validate_selection(config.selection)
+    if config.mode not in MODES:
+        raise ValueError(f"--mode must be one of: {', '.join(MODES)}")
+    for name, value in config.weights:
+        parse_weight(f"{name}={value}")
     if config.time_window < 0:
         raise ValueError("--burst-window cannot be negative")
     if config.max_burst_duration < config.time_window:
@@ -1590,8 +1722,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--select",
         dest="selection",
         help=(
-            "Number of photos to export, 'all', or 'none'; skips the prompt. "
-            "Feedback keeps are always exported"
+            "Number of photos to export, a percentage such as 10%%, 'all', or 'none'; "
+            "skips the tuning screen. Feedback keeps are always exported"
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=MODES,
+        default="bursts",
+        help=(
+            "What the export count counts: bursts counts each burst once, photos counts "
+            "every photo (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--weight",
+        dest="weights",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=(
+            f"Replace one preset weight with a value from 0 to {MAX_WEIGHT:g}; repeatable. "
+            f"Names: {', '.join(SLIDER_BY_NAME)}"
         ),
     )
     parser.add_argument(
@@ -1666,6 +1818,8 @@ def config_from_args(args: argparse.Namespace) -> PipelineConfig:
         plain=args.plain,
         debug=args.debug,
         check_model_updates=not args.no_model_update_check,
+        mode=args.mode,
+        weights=tuple(parse_weight(text) for text in args.weights),
     )
 
 

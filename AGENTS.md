@@ -63,6 +63,7 @@ an update. If the lock changes, include it in validation and explain why it chan
 | `evaluation_cache.py` | SQLite cache schema, migration, lookup, and checkpoint writes |
 | `portfolio.py` | Feedback parsing, diversity selection, and HTML review output |
 | `thumbnail_store.py` | Shared review thumbnails: identity, decode on a miss, and pruning |
+| `tuning.py` | Post-evaluation tuning screen: modes, targets, weights, burst levels, and the preview |
 | `xmp_rating.py` | Export-only XMP rating updates |
 | `run_audit.py` | Atomic JSON/CSV output and failure records |
 | `validation.py` | Human-feedback quality metrics and validator CLI |

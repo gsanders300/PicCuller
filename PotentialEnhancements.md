@@ -97,7 +97,9 @@ blocks it. It does not repeat the system specification.
   - lists every exported photo with the reason it was chosen
   - re-prompts bad input
   - handles discovery interrupts
-  - writes metrics before the selection prompt
+  - writes metrics before the tuning screen
+  - tunes the selection after evaluation: counting mode, count or percentage, weights,
+    diversity, and burst looseness, with a file-manager preview of the cut
 - **Remaining work:** Integrate Hugging Face download output with the line-oriented
   reporter. Add operating-system-backed pseudo-terminal coverage.
 - **Known limit:** Active Pillow or LibRaw calls cannot be cancelled safely. Queued decodes

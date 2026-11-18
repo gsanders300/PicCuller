@@ -21,44 +21,12 @@ class SelectionInputTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _selection_count("5", 4)
 
-    def test_interactive_selection_reprompts_after_invalid_values(self) -> None:
-        fake_console = Mock()
-        fake_console.is_terminal = True
-        fake_console.input.side_effect = ["five", "9", "2"]
-        fake_stdin = Mock()
-        fake_stdin.isatty.return_value = True
-
-        with (
-            patch.object(cull, "console", fake_console),
-            patch.object(cull.sys, "stdin", fake_stdin),
-        ):
-            count = _selection_count(None, 4)
-
-        self.assertEqual(count, 2)
-        self.assertEqual(fake_console.input.call_count, 3)
-        warnings = [
-            call.args[0] for call in fake_console.print.call_args_list if "Warning:" in call.args[0]
-        ]
-        self.assertEqual(len(warnings), 2)
-
-    def test_the_prompt_explains_that_feedback_keeps_count_toward_the_number(self) -> None:
-        fake_console = Mock()
-        fake_console.is_terminal = True
-        fake_console.input.return_value = "3"
-        fake_stdin = Mock()
-        fake_stdin.isatty.return_value = True
-
-        with (
-            patch.object(cull, "console", fake_console),
-            patch.object(cull.sys, "stdin", fake_stdin),
-        ):
-            count = _selection_count(None, 4, keep_count=2)
-
-        self.assertEqual(count, 3)
-        note = fake_console.print.call_args.args[0]
-        self.assertIn("2 photos marked keep", note)
-        self.assertIn("count toward this number", note)
-        self.assertIn("How many photos to export", fake_console.input.call_args.args[0])
+    def test_percentages_resolve_against_the_available_count(self) -> None:
+        self.assertEqual(_selection_count("10%", 1840), 184)
+        self.assertEqual(_selection_count("50 %", 3), 2)
+        self.assertEqual(_selection_count("1%", 10), 1)
+        with self.assertRaises(ValueError):
+            _selection_count("150%", 10)
 
     def test_noninteractive_default_explains_that_feedback_keeps_apply(self) -> None:
         fake_console = Mock()
@@ -98,12 +66,12 @@ class SelectionValidationTests(unittest.TestCase):
     """--select must fail before the evaluation pass, not after it."""
 
     def test_malformed_values_are_rejected_up_front(self) -> None:
-        for value in ("3O", "five", "1.5", "-5", "2,3"):
+        for value in ("3O", "five", "1.5", "-5", "2,3", "0.5x", "101%", "nan%", "%"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 _validate_selection(value)
 
     def test_accepted_values_pass(self) -> None:
-        for value in (None, "", "none", "skip", "all", "ALL", "0", "7", " 3 "):
+        for value in (None, "", "none", "skip", "all", "ALL", "0", "7", " 3 ", "10%", "2.5%"):
             with self.subTest(value=value):
                 _validate_selection(value)
 

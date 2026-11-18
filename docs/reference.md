@@ -131,7 +131,9 @@ and does not cache the evaluations it makes during the fallback.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `--select N\|all\|none` | Prompt, or `none` without a terminal | How many photos to export. `N` runs from 1 to the number of burst winners. The format is checked before evaluation starts; the count is checked against the winners after ranking. |
+| `--select N\|P%\|all\|none` | Tuning screen, or `none` without a terminal | How many photos to export, as a count or a percentage. With `--mode bursts`, `N` runs from 1 to the number of burst winners; with `--mode photos`, to the number of photos. The format is checked before evaluation starts; the count is checked after ranking. |
+| `--mode bursts\|photos` | `bursts` | What the export count counts. See [Selection count](#selection-count). |
+| `--weight NAME=VALUE` | The preset's weights | Replace one scoring weight with a value from 0 to 3. Repeat it for several weights. See [Weights](#weights). |
 | `--diversity NUMBER` | `0.0` | Preference for photos that look different, from 0 to 1. See [Diversity](#diversity). |
 | `--feedback PATH` | None | Apply `keep` and `reject` decisions from a CSV file. |
 | `--contact-sheet INTEGER` | `100` | Maximum thumbnails on the review page. The page shows complete bursts, so this limits photos, not bursts. `0` skips the page. |
@@ -363,6 +365,9 @@ and 1, raised to a per-preset weight. A higher weight makes that factor matter m
 | `portrait` | 0.60 | 0.7 | 1.6 | 1.0 | 0.8 | 0.35 | 0.15 |
 | `landscape` | 0.45 | 1.2 | 1.2 | 1.1 | 1.2 | 0.0 | 0.15 |
 
+Every preset also raises the aesthetic score to an aesthetic weight of 1.0, which leaves it
+unchanged. [Weights](#weights) explains how to change any of these weights for one run.
+
 The `balanced` absolute focus weight was lowered from 1.0 to 0.5 after one shoot's keep and
 reject decisions. Sharpness compared with the whole run agreed with them least of all the
 measures, because a photo with little fine detail reads as soft even when it is in focus.
@@ -461,7 +466,7 @@ trust it. See [Validate the ranking](#validate-the-ranking).
 
 ~~~text
 composite =
-  max(0, aesthetic)
+  max(0, aesthetic) ^ aesthetic_weight
   × absolute_focus_factor ^ absolute_focus_weight
   × relative_focus_ratio ^ relative_focus_exponent
   × clamp(MUSIQ / 100) ^ MUSIQ_weight
@@ -472,8 +477,30 @@ composite =
 
 `clamp` limits a value to the range 0 through 1.
 
-`evaluation.csv` records each weighted term in a `*_multiplier` column. The aesthetic score
-multiplied by the six multipliers, in column order, equals `composite_score` exactly.
+`evaluation.csv` records each weighted term in a `*_multiplier` column. The aesthetic score,
+raised to the aesthetic weight, multiplied by the six multipliers in column order, equals
+`composite_score` exactly. With the default aesthetic weight of 1.0, that is the aesthetic
+score itself. `run.json` records the weights a run used under `selection_settings`.
+
+### Weights
+
+The tuning screen and `--weight` change the weights for one run. They start from the
+`--preset` values. Each name matches one weight:
+
+| Name | Weight | What it controls |
+| --- | --- | --- |
+| `appeal` | `aesthetic_weight` | Visual appeal from the aesthetic model. 0 ranks on the technical factors alone. |
+| `sharpness` | `absolute_focus_weight` | Sharpness compared with the whole run. |
+| `burst-sharpness` | `relative_focus_exponent` | Sharpness compared with the sharpest frame of the same burst. |
+| `quality` | `musiq_weight` | MUSIQ technical quality. |
+| `exposure` | `exposure_weight` | The clipping penalty. |
+| `eyes` | `eye_weight` | The eye check. It has data only with `--preset portrait`. |
+| `subject` | `subject_weight` | Subject integrity, using the `--preset` prompts. |
+
+A weight of 0 ignores its factor, and a higher weight makes the factor harsher. Only the
+ratio between weights changes the ranking, so doubling every weight changes nothing. The
+focus floor and the subject prompts stay those of `--preset`. A weight changes the score,
+not the evaluation, so the cache is reused.
 
 The absolute focus factor compares a photo with the other candidates in the same run, so the
 same photo can score differently in a different collection.
@@ -538,7 +565,18 @@ Rank 1 is the best. Equal scores are ordered by normalized path.
 
 ### Selection count
 
-The requested count picks that many burst winners in score order. Feedback then applies:
+The mode decides what the count counts:
+
+| Mode | Candidates | A percentage is taken of |
+| --- | --- | --- |
+| `bursts` (default) | The winner of each burst, so a burst counts as one shot however many frames it holds. | The number of bursts. |
+| `photos` | Every photo, ranked by `global_quality_rank`. One burst can contribute several frames. | The number of photos. |
+
+A percentage rounds half up and selects at least one photo, so `10%` of 1,840 photos is 184.
+In the tuning screen, a count above the number of candidates is capped, and the summary says
+so. An explicit `--select` count above it fails after ranking instead.
+
+The requested count picks that many candidates in score order. Feedback then applies:
 
 - A `keep` forces a photo into the selection, even if it lost its burst, and counts toward the
   requested number.
@@ -609,7 +647,7 @@ the ratings.
 ## Terminal interface
 
 The interface streams output into normal terminal history. It has no full-screen mode,
-menus, mouse input, or cursor navigation.
+mouse input, or cursor navigation. The tuning screen reads typed commands.
 
 ### Display and input modes
 
@@ -619,11 +657,11 @@ Display and selection input are decided separately:
 | --- | --- |
 | Output is a terminal, no `--plain` | Color, animated status, and a live progress bar. |
 | `--plain`, or output is redirected | Static text without color, with one progress line per evaluation batch. |
-| Input and output are both terminals, no `--select` | Prompt for the export count. |
-| `--select` given, or either stream redirected | No prompt. Without `--select`, nothing is exported automatically; feedback keeps still are. |
+| Input and output are both terminals, no `--select` | Show the tuning screen. |
+| `--select` given, or either stream redirected | No tuning screen. Without `--select`, nothing is exported automatically; feedback keeps still are. |
 
-For example, `--plain` in a normal terminal still prompts, and redirected input disables the
-prompt even when the display still shows Rich progress.
+For example, `--plain` in a normal terminal still shows the tuning screen, and redirected
+input disables it even when the display still shows Rich progress.
 
 ### What the terminal shows
 
@@ -640,31 +678,53 @@ prompt even when the display still shows Rich progress.
 6. The `Top Burst Winners` table: up to ten winners with selection rank, path within the
    source directory, composite score, and [score reason](#score-reasons). A line below it
    gives the winner and candidate counts and says how the score is formed.
-7. The export prompt (see below).
+7. The tuning screen (see below).
 8. After an export, the `Exported Photos` table: each exported photo in selection order, its
-   score, and why it was selected (`burst winner #N` or `marked keep in feedback`). It shows
+   score, and why it was selected (`burst winner #N`, `quality rank #N` in `photos` mode, or
+   `marked keep in feedback`). It shows
    at most 20 rows; the `portfolio_selected` column in `evaluation.csv` lists them all. With
    `--diversity` above zero, a note says a lower-ranked winner can replace a similar one.
 9. `Run finished:` with the run directory and one line each for `evaluation.csv`,
    `review.html`, `picks/`, and `failures.csv` when a failure occurred.
 
-`evaluation.csv` is written before the prompt, so an interrupt or bad answer at the prompt
-never loses completed metrics.
+`evaluation.csv` is written before the tuning screen, so an interrupt or a bad answer there
+never loses completed metrics. It is written again with the final settings.
 
-### Export prompt
+### Tuning screen
 
-The prompt reads `How many photos to export, best first?`. If the feedback file has keeps, a
-line first states how many and that they count toward the number you enter.
+Evaluation is the slow part of a run. The tuning screen lets you set the export after it,
+because every change only rescores, regroups, or reselects the stored metrics. A change
+redraws in well under a second and loads no model.
 
-| Answer | Result |
+The screen first lists every setting with its value and a one-line description, then a
+summary: the mode, the target, how many photos it selects, the score at the cut, how many
+photos entered and left the selection with your last change, and how many files and bytes
+the export would copy. It warns when a count is capped or when feedback keeps exceed it.
+
+| Input | Result |
 | --- | --- |
-| Enter, `none`, `skip`, or `0` | Export no burst winners. Feedback keeps are still exported. |
-| `all` | Request every burst winner. |
-| A number from 1 to the winner count | Request that many. |
-| Anything else, or a number out of range | Show the error and ask again. |
-| End of input (EOF) | Same as `none`. |
+| A count, a percentage such as `10%`, `all`, or `none` | Set the target. `skip` and `0` mean `none`. |
+| `mode bursts` or `mode photos` | Set the [counting mode](#selection-count). |
+| A weight name and a value from 0 to 3, such as `sharpness 1.5` | Set that [weight](#weights). |
+| `diversity` and a value from 0 to 1 | Set the [diversity](#diversity). |
+| `bursts tighter`, `bursts normal`, or `bursts looser` | Halve or double both burst time limits, and tighten or relax both look-alike tests by 2 pHash steps and 0.04 CLIP similarity. `normal` uses the burst options. These steps are uncalibrated. |
+| `start` and a preset name | Load that preset's weights. The subject prompts and eye data stay those of `--preset`. |
+| `show` | Preview the cut in your file manager. See below. |
+| `settings` or `help` | List the settings or the commands again. |
+| Enter | Export with the current settings. Feedback keeps are always exported. |
+| Anything else | Show the error and ask again. |
+| End of input (EOF) | Export with a target of `none`. |
 
-A `--select` value skips the prompt, so use it in scripts.
+`show` copies review thumbnails into the run's `preview/in` and `preview/out` folders and
+opens them in Explorer, Finder, or your desktop's file manager. After a change, they hold the
+photos that entered and left the selection, nearest the cut first. Before any change, they
+hold the photos just above and below the cut. Each folder shows at most 25 photos. While you
+read the summary, Photo Cull decodes the thumbnails nearest the cut in the background, so
+`show` usually decodes nothing. The folders hold copies, never links to your originals.
+`--contact-sheet 0` turns off thumbnails, and with them the preview.
+
+A `--select` value skips the tuning screen, so use it in scripts. `--mode` and `--weight`
+set the same values without the screen.
 
 ### Warnings and errors
 
@@ -725,6 +785,7 @@ The default layout:
     ├── feedback.csv
     ├── review.html
     ├── thumbnails/
+    ├── preview/                 in/ and out/, from the tuning screen's show
     ├── picks/
     └── export_manifest.csv
 ~~~
@@ -732,6 +793,7 @@ The default layout:
 Some items are conditional:
 
 - `review.html` and `thumbnails/` are absent with `--contact-sheet 0`.
+- `preview/` exists only after `show` in the tuning screen.
 - `picks/` and `export_manifest.csv` are absent when nothing is exported.
 - Generated XMP files are absent without `--write-xmp`.
 - The cache is absent with `--no-cache` when no earlier cache exists.
@@ -745,6 +807,8 @@ The run audit, updated throughout the run. Its final status is `completed`, `fai
 - start, update, and completion times
 - source, output, and run paths
 - all configuration values and scoring-profile values
+- `selection_settings`: the mode, target, requested count, weights, diversity, burst
+  setting, effective burst limits, and scoring profile the selection used
 - model names, revisions, and SHA-256 values
 - the model update check: its status, any newer models, and any lookup that failed
   (absent with `--no-model-update-check`)
@@ -752,6 +816,7 @@ The run audit, updated throughout the run. Its final status is `completed`, `fai
 - counts: discovered, cached, evaluated, preset-refreshed, failed, winners, selected, and
   exported
 - contact-sheet counts: images, bursts, thumbnails decoded, reused, and pruned
+- preview thumbnails decoded by the tuning screen, when any were
 - capture-time counts: from metadata, from file dates, and with an assumed time zone
 - feedback counts, when a feedback file is given: decisions, matched, keep, and reject
 - phase times, and per-stage times with an image count for each stage
@@ -946,7 +1011,7 @@ remaining images.
 
 - Each new evaluation is checkpointed as soon as it succeeds, and each known failure is
   recorded immediately.
-- An interrupt at the export prompt keeps the complete `evaluation.csv`; its
+- An interrupt at the tuning screen keeps the complete `evaluation.csv`; its
   `portfolio_selected` column is `False` because nothing was selected.
 - After a supported device or memory failure, work moves from the accelerator to the CPU.
   This also applies when scoring cached embeddings for a new preset. A large CLIP batch is
