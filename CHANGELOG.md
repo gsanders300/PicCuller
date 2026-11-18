@@ -3,6 +3,13 @@
 Each release lists what changed for people who use Photo Cull. The release workflow
 generates new sections from commit messages and publishes the section that matches the tag.
 
+## [1.2.1](https://github.com/gsanders300/PicCuller/compare/v1.2.0...v1.2.1) (2026-11-18)
+
+
+### Fixed
+
+* make the tuning screen's text and documentation clearer ([8000ac0](https://github.com/gsanders300/PicCuller/commit/8000ac05887fefbd22a72db9061ec9fe5d1f56dc))
+
 ## [1.2.0](https://github.com/gsanders300/PicCuller/compare/v1.1.3...v1.2.0) (2026-11-18)
 
 
